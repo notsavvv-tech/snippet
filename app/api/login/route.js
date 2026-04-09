@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { generateCodeChallenge, generateCodeVerifier } from "../../../lib/pkce";
 
-const REDIRECT_URI = "http://127.0.0.1:3000/callback";
+const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI ?? "http://127.0.0.1:3000/callback";
 const PKCE_COOKIE = "spotify_pkce_verifier";
 
 const SCOPES = [

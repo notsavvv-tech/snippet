@@ -424,7 +424,7 @@ export default function Home() {
         <div style={s.empty}>
           <p style={{
             ...s.emptyTitle,
-            background: `linear-gradient(135deg, #ff5500, #7b31c7)`,
+            background: GRAD,
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent",
             backgroundClip: "text",
@@ -821,7 +821,7 @@ export default function Home() {
 
 const ORANGE = "#ff5500";
 const PURPLE = "#7b31c7";
-const GRAD = `linear-gradient(135deg, ${ORANGE}, ${PURPLE})`;
+const GRAD = "linear-gradient(135deg, #ff5500 -124%, #7b31c7 224%)";
 
 const s = {
   main: {
@@ -922,8 +922,7 @@ const s = {
     width: 40, height: 40, display: "flex", alignItems: "center",
     justifyContent: "center", cursor: "pointer", fontSize: "0.95rem",
     color: "#fff", flexShrink: 0,
-    boxShadow: `0 2px 12px rgba(255,85,0,0.4)`,
-    transition: "transform 0.15s, box-shadow 0.15s",
+    transition: "transform 0.15s",
   },
   volumeRow: {
     display: "flex", alignItems: "center", gap: "0.5rem", flex: 1,
@@ -996,7 +995,8 @@ const s = {
   },
   likedArt: {
     width: 42, height: 42, borderRadius: 8, flexShrink: 0,
-    background: `linear-gradient(135deg, #5c0f3a, ${PURPLE})`,
+    background: "#1e1e2e",
+    border: "1px solid rgba(255,85,0,0.25)",
     display: "flex", alignItems: "center",
     justifyContent: "center", fontSize: "1.1rem",
   },
@@ -1053,7 +1053,6 @@ const s = {
     background: GRAD,
     color: "#fff", fontWeight: 700,
     cursor: "pointer", fontSize: "0.82rem", whiteSpace: "nowrap",
-    boxShadow: "0 2px 10px rgba(255,85,0,0.3)",
     transition: "opacity 0.15s",
   },
   btnPrimaryLg: {
@@ -1061,7 +1060,6 @@ const s = {
     borderRadius: 12, border: "none",
     background: GRAD,
     color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: "1rem",
-    boxShadow: "0 4px 20px rgba(255,85,0,0.35)",
     letterSpacing: "-0.01em",
   },
   btnGhost: {
@@ -1155,7 +1153,6 @@ const s = {
     background: GRAD, border: "none",
     color: "#fff", cursor: "pointer",
     display: "flex", alignItems: "center", justifyContent: "center",
-    boxShadow: "0 4px 24px rgba(255,85,0,0.45)",
     transition: "transform 0.15s",
   },
   modalPlayFromStart: {
@@ -1163,7 +1160,6 @@ const s = {
     background: GRAD, border: "none",
     color: "#fff", fontWeight: 700, fontSize: "0.95rem",
     cursor: "pointer",
-    boxShadow: "0 4px 20px rgba(255,85,0,0.4)",
   },
   modalTimestamps: {
     borderTop: "1px solid rgba(255,255,255,0.06)",

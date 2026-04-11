@@ -460,7 +460,7 @@ export default function Home() {
                     onChange={handleSeekChange}
                     onMouseUp={handleSeekCommit}
                     onTouchEnd={handleSeekCommit}
-                    style={{...s.seekSlider, background: `linear-gradient(to right, ${ORANGE} 0%, ${ORANGE} ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a 100%)`}}
+                    style={{...s.seekSlider, background: `linear-gradient(to right, transparent 0%, transparent ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a 100%), ${GRAD}`}}
                   />
                   <div style={s.times}>
                     <span>{formatMs(estimatedPos)}</span>
@@ -492,7 +492,7 @@ export default function Home() {
                     max={100}
                     value={volume ?? 50}
                     onChange={handleVolumeChange}
-                    style={{...s.volumeSlider, background: `linear-gradient(to right, ${ORANGE} 0%, ${ORANGE} ${volume ?? 50}%, #2a2a3a ${volume ?? 50}%, #2a2a3a 100%)`}}
+                    style={{...s.volumeSlider, background: `linear-gradient(to right, transparent 0%, transparent ${volume ?? 50}%, #2a2a3a ${volume ?? 50}%, #2a2a3a 100%), ${GRAD}`}}
                     title={`Volume: ${volume ?? 50}%`}
                   />
                   <span style={s.volumeLabel}>{volume ?? 50}%</span>
@@ -766,7 +766,7 @@ export default function Home() {
                     onMouseUp={handleSeekCommit}
                     onTouchEnd={handleSeekCommit}
                     /*Playback progress bar*/
-                    style={{...s.modalSeek, background: `linear-gradient(to right, ${ORANGE} 0%, ${ORANGE} ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a 100%)`}}
+                    style={{...s.modalSeek, background: `linear-gradient(to right, transparent 0%, transparent ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a 100%), ${GRAD}`}}
                   />
                   <div style={s.modalTimes}>
                     <span>{formatMs(estimatedPos)}</span>
@@ -901,8 +901,9 @@ const s = {
     fontSize: "0.7rem", color: "#5a5a78",
   },
   shuffleOn: {
-    background: "none", border: "none", cursor: "pointer",
-    fontSize: "0.9rem", color: ORANGE, padding: 0, lineHeight: 1,
+    background: GRAD, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+    backgroundClip: "text", border: "none", cursor: "pointer",
+    fontSize: "0.9rem", padding: 0, lineHeight: 1,
   },
   shuffleOff: {
     background: "none", border: "none", cursor: "pointer",

@@ -5,13 +5,14 @@ import {
   playSnippet,
   getPlayerState,
   getUserPlaylists,
-getPlaylistTracks,
+  getPlaylistTracks,
   getLikedTracks,
   setShuffle,
   pausePlayback,
   resumePlayback,
   setVolume,
   seekToPosition,
+  getDevices,
 } from "../lib/snippet";
 import {
   fetchAllTimestamps,
@@ -47,6 +48,15 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState("home");
   const [pressedTab, setPressedTab] = useState(null);
+
+  // Web Playback SDK — browser is the Spotify device
+  const [webPlayerId, setWebPlayerId] = useState(null);
+  const sdkPlayerRef = useRef(null);
+
+  // Device selection fallback (when SDK isn't available)
+  const [devices, setDevices] = useState([]);
+  const [deviceId, setDeviceId] = useState(null);
+  const [loadingDevices, setLoadingDevices] = useState(false);
 
   // Now Playing
   const [playerState, setPlayerState] = useState(null);
@@ -136,6 +146,45 @@ export default function Home() {
     }
   }, []);
 
+  // ── Web Playback SDK ────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!token || typeof window === "undefined") return;
+
+    const initPlayer = () => {
+      if (!window.Spotify || sdkPlayerRef.current) return;
+      const player = new window.Spotify.Player({
+        name: "Snippet",
+        getOAuthToken: (cb) => cb(getStoredToken()),
+        volume: 0.8,
+      });
+      player.addListener("ready", ({ device_id }) => setWebPlayerId(device_id));
+      player.addListener("not_ready", () => setWebPlayerId(null));
+      player.connect();
+      sdkPlayerRef.current = player;
+    };
+
+    if (window.Spotify) {
+      initPlayer();
+    } else {
+      window.onSpotifyWebPlaybackSDKReady = initPlayer;
+      if (!document.querySelector('script[src="https://sdk.scdn.co/spotify-player.js"]')) {
+        const script = document.createElement("script");
+        script.src = "https://sdk.scdn.co/spotify-player.js";
+        script.async = true;
+        document.body.appendChild(script);
+      }
+    }
+
+    return () => {
+      if (sdkPlayerRef.current) {
+        sdkPlayerRef.current.disconnect();
+        sdkPlayerRef.current = null;
+        setWebPlayerId(null);
+      }
+    };
+  }, [token]);
+
   // ── Spotify polling ─────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -159,6 +208,26 @@ export default function Home() {
     const id = setInterval(poll, 3000);
     return () => clearInterval(id);
   }, [token]);
+
+  // Fetch available devices whenever playerState is null (nothing active)
+  const fetchDevices = useCallback(async () => {
+    const t = getStoredToken();
+    if (!t) return;
+    setLoadingDevices(true);
+    const list = await getDevices(t);
+    setDevices(list);
+    setLoadingDevices(false);
+    // Auto-select if only one device available
+    if (list.length === 1 && !deviceId) setDeviceId(list[0].id);
+  }, [deviceId]);
+
+  // Initial fetch + auto-poll every 5s while nothing is playing
+  useEffect(() => {
+    if (!token || playerState) return;
+    fetchDevices();
+    const id = setInterval(fetchDevices, 5000);
+    return () => clearInterval(id);
+  }, [token, playerState]);
 
   // Smooth position estimate between polls
   useEffect(() => {
@@ -235,7 +304,9 @@ export default function Home() {
     if (!trackUri || trackUri.startsWith("spotify:local:")) return;
     const t = getStoredToken();
     if (!t) return;
-    const res = await playSnippet(t, { trackUri, positionMs });
+    // Prefer browser SDK player, then manually selected device, then active player
+    const targetDevice = playerState ? null : (webPlayerId || deviceId);
+    const res = await playSnippet(t, { trackUri, positionMs, deviceId: targetDevice });
     if (res.status === 204 || res.ok) {
       lastPollRef.current = { time: Date.now(), positionMs, isPlaying: true };
       setEstimatedPos(positionMs);
@@ -259,7 +330,8 @@ export default function Home() {
       return;
     }
     if (res.status === 404) {
-      alert("No active Spotify device. Open Spotify on any device and start playing something first, then try again.");
+      setDeviceId(null);
+      fetchDevices();
       return;
     }
     if (res.status === 403) {
@@ -267,7 +339,7 @@ export default function Home() {
       return;
     }
     console.error("[jump] unexpected status", res.status);
-  }, []);
+  }, [playerState, deviceId, webPlayerId, doRefresh, fetchDevices]);
 
   // ── Volume (local optimistic state) ─────────────────────────────────────────
 
@@ -448,9 +520,56 @@ export default function Home() {
           {activeTab === "home" && (<>
           {/* ── Now Playing ── */}
           {!playerState ? (
-            <p style={{ ...s.muted, marginBottom: "1.5rem" }}>
-              Nothing playing — open Spotify and start a track.
-            </p>
+            webPlayerId ? (
+              <div style={s.devicePicker}>
+                <p style={s.devicePickerHeading}>Ready to play</p>
+                <p style={{ ...s.muted, fontSize: "0.82rem" }}>
+                  Tap ▶ on any track below — audio will play here in the browser.
+                </p>
+              </div>
+            ) : (
+            <div style={s.devicePicker}>
+              <p style={s.devicePickerHeading}>Where do you want to play?</p>
+              <p style={{ ...s.muted, marginBottom: "1.25rem", fontSize: "0.8rem" }}>
+                The browser player is connecting… or open Spotify on another device.
+              </p>
+              {devices.length === 0 ? (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                  <p style={{ ...s.muted, margin: 0, fontSize: "0.82rem" }}>
+                    {loadingDevices ? "Looking for devices…" : "No other devices found."}
+                  </p>
+                  {!loadingDevices && (
+                    <button style={{ ...s.btnGhost, fontSize: "0.75rem", whiteSpace: "nowrap" }} onClick={fetchDevices}>
+                      Refresh
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div style={s.deviceList}>
+                  {devices.map((d) => {
+                    const icon = d.type === "Smartphone" ? "📱" : d.type === "Speaker" ? "🔊" : d.type === "TV" ? "📺" : "💻";
+                    const isSelected = deviceId === d.id;
+                    return (
+                      <button
+                        key={d.id}
+                        style={{ ...s.deviceRow, ...(isSelected ? s.deviceRowActive : {}) }}
+                        onClick={() => setDeviceId(d.id)}
+                      >
+                        <span style={s.deviceIcon}>{icon}</span>
+                        <span style={s.deviceName}>{d.name}</span>
+                        {isSelected && <span style={s.deviceCheck}>✓</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {deviceId && (
+                <p style={{ ...s.muted, marginTop: "1rem", fontSize: "0.78rem" }}>
+                  Ready — tap ▶ on any track below to start playing.
+                </p>
+              )}
+            </div>
+            )
           ) : (
             <div style={s.card}>
               <div style={s.cardGradientBar} />
@@ -1033,7 +1152,15 @@ const s = {
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
     letterSpacing: "-0.01em",
   },
-  artist: { margin: "0 0 0.6rem", color: "#8888aa", fontSize: "0.82rem" },
+  artist: { margin: "0 0 0.3rem", color: "#8888aa", fontSize: "0.82rem" },
+  deviceBadge: {
+    margin: "0 0 0.5rem",
+    fontSize: "0.7rem",
+    color: "#4a4a68",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.25rem",
+  },
   seekSlider: {
     width: "100%", cursor: "pointer",
     marginBottom: "0.3rem", display: "block",
@@ -1213,6 +1340,50 @@ const s = {
     color: "#8888aa", cursor: "pointer", fontSize: "0.82rem",
     transition: "border-color 0.15s",
   },
+
+  // ── Device Picker ──
+  devicePicker: {
+    background: "#13131f",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,0.07)",
+    padding: "1.25rem",
+    marginBottom: "1.5rem",
+  },
+  devicePickerHeading: {
+    fontSize: "1rem",
+    fontWeight: 700,
+    margin: "0 0 0.35rem",
+    color: "#f0f0f5",
+    letterSpacing: "-0.01em",
+  },
+  deviceList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.4rem",
+  },
+  deviceRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.75rem",
+    width: "100%",
+    padding: "0.7rem 1rem",
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.07)",
+    borderRadius: 12,
+    color: "#c0c0d8",
+    cursor: "pointer",
+    textAlign: "left",
+    fontSize: "0.88rem",
+    transition: "background 0.15s, border-color 0.15s",
+  },
+  deviceRowActive: {
+    background: "rgba(255,85,0,0.1)",
+    border: "1px solid rgba(255,85,0,0.35)",
+    color: "#f0f0f5",
+  },
+  deviceIcon: { fontSize: "1.1rem", flexShrink: 0 },
+  deviceName: { flex: 1, fontWeight: 500 },
+  deviceCheck: { color: "#ff5500", fontWeight: 700, fontSize: "0.9rem" },
 
   // ── Bottom Nav ──
   bottomNav: {

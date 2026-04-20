@@ -5,7 +5,7 @@ Ask Nick about what color we should use for the icons
 Fix off centered-ness on mobile view
 Next to the playing songs showcase how many snippets their are for that song
 
-Add a home search and profile bottom bar for mobile view
-Make it so that you dont need to already be playing a song for it to show up
 Make it so that i can log in through the spotify open in app instead of log in
 Snippets category on the playlist page
+Add a page for removing snippets
+Some form of slider for going from only snippets to the full song on the play page

@@ -53,6 +53,31 @@ export async function POST(request) {
   return NextResponse.json(timestamps);
 }
 
+// PATCH /api/timestamps — body: { trackId, index, label }
+export async function PATCH(request) {
+  const userId = await resolveUserId(request.headers.get("Authorization"));
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { trackId, index, label } = await request.json();
+  if (!trackId || index == null) {
+    return NextResponse.json({ error: "Missing trackId or index" }, { status: 400 });
+  }
+
+  const existing = await redis.hget(redisKey(userId), trackId);
+  const timestamps = existing
+    ? (typeof existing === "string" ? JSON.parse(existing) : existing)
+    : [];
+
+  if (index < 0 || index >= timestamps.length) {
+    return NextResponse.json({ error: "Index out of range" }, { status: 400 });
+  }
+
+  timestamps[index].label = label || null;
+
+  await redis.hset(redisKey(userId), { [trackId]: JSON.stringify(timestamps) });
+  return NextResponse.json(timestamps);
+}
+
 // DELETE /api/timestamps — body: { trackId, index }
 export async function DELETE(request) {
   const userId = await resolveUserId(request.headers.get("Authorization"));

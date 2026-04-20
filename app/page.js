@@ -18,6 +18,7 @@ import {
   fetchAllTimestamps,
   saveTimestamp,
   deleteTimestamp,
+  updateTimestamp,
   formatMs,
 } from "../lib/timestamps";
 
@@ -80,6 +81,10 @@ export default function Home() {
 
   // Track detail modal
   const [selectedTrack, setSelectedTrack] = useState(null);
+
+  // Snippet editing
+  const [editingSnippet, setEditingSnippet] = useState(null); // { trackId, index, label }
+  const [editLabel, setEditLabel] = useState("");
 
   // ── Token refresh ───────────────────────────────────────────────────────────
 
@@ -336,9 +341,7 @@ export default function Home() {
     }
     if (res.status === 403) {
       alert("Spotify Premium is required for playback control.");
-      return;
     }
-    console.error("[jump] unexpected status", res.status);
   }, [playerState, deviceId, webPlayerId, doRefresh, fetchDevices]);
 
   // ── Volume (local optimistic state) ─────────────────────────────────────────
@@ -426,6 +429,16 @@ export default function Home() {
       }
       return next;
     });
+  }, []);
+
+  const handleUpdateTimestamp = useCallback(async (trackId, index, label) => {
+    const t = getStoredToken();
+    if (!t) return;
+    const updated = await updateTimestamp(t, trackId, index, label);
+    if (updated) {
+      setAllTimestamps((prev) => ({ ...prev, [trackId]: updated }));
+    }
+    setEditingSnippet(null);
   }, []);
 
   // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -671,6 +684,89 @@ export default function Home() {
               </div>{/* cardInner */}
             </div>
           )}
+
+          {/* ── Your Snippets ── */}
+          {Object.keys(allTimestamps).length > 0 && (() => {
+            const trackLookup = {};
+            (likedTracks || []).forEach((t) => { trackLookup[t.id] = t; });
+            Object.values(playlistTracks).flat().forEach((t) => { trackLookup[t.id] = t; });
+            if (playerState) trackLookup[playerState.id] = { id: playerState.id, name: playerState.name, uri: playerState.uri, artists: playerState.artists, albumArt: playerState.albumArt, durationMs: playerState.durationMs };
+
+            const snippetTracks = Object.entries(allTimestamps).map(([trackId, tss]) => ({
+              trackId,
+              track: trackLookup[trackId] ?? null,
+              tss,
+            }));
+
+            return (
+              <div style={s.librarySection}>
+                <p style={s.libraryLabel}>Your Snippets</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {snippetTracks.map(({ trackId, track, tss }) => (
+                    <div key={trackId} style={s.snippetCard}>
+                      <div style={s.snippetCardHeader}>
+                        {track?.albumArt ? (
+                          <img src={track.albumArt} alt="" style={s.snippetArt} />
+                        ) : (
+                          <div style={s.snippetArtFallback} />
+                        )}
+                        <div style={s.snippetTrackMeta}>
+                          <span style={s.snippetTrackName}>{track?.name ?? "Unknown track"}</span>
+                          <span style={s.snippetTrackArtist}>{track?.artists ?? trackId}</span>
+                        </div>
+                        {track && (
+                          <button style={s.playTrackBtn} onClick={() => jump(track.uri, 0)} title="Play from start">▶</button>
+                        )}
+                      </div>
+                      <div style={s.snippetList}>
+                        {tss.map((ts, i) => {
+                          const isEditing = editingSnippet?.trackId === trackId && editingSnippet?.index === i;
+                          return (
+                            <div key={i} style={s.snippetRow}>
+                              {isEditing ? (
+                                <>
+                                  <input
+                                    style={s.snippetEditInput}
+                                    value={editLabel}
+                                    onChange={(e) => setEditLabel(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleUpdateTimestamp(trackId, i, editLabel);
+                                      if (e.key === "Escape") setEditingSnippet(null);
+                                    }}
+                                    autoFocus
+                                  />
+                                  <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                                  <button style={s.snippetSaveBtn} onClick={() => handleUpdateTimestamp(trackId, i, editLabel)}>✓</button>
+                                  <button style={s.deleteBtn} onClick={() => setEditingSnippet(null)}>✕</button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    style={s.jumpBtn}
+                                    onClick={() => track && jump(track.uri, ts.positionMs)}
+                                  >
+                                    <span style={s.playIcon}>▶</span>
+                                    <span style={s.tsLabel}>{ts.label || formatMs(ts.positionMs)}</span>
+                                  </button>
+                                  <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                                  <button
+                                    style={s.editBtn}
+                                    onClick={() => { setEditingSnippet({ trackId, index: i }); setEditLabel(ts.label || ""); }}
+                                    title="Edit label"
+                                  >✏</button>
+                                  <button style={s.deleteBtn} onClick={() => handleDelete(trackId, i)} title="Remove">✕</button>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ── My Library ── */}
           <div style={s.librarySection}>
@@ -1082,7 +1178,6 @@ export default function Home() {
 }
 
 const ORANGE = "#ff5500";
-const PURPLE = "#7b31c7";
 const GRAD = "linear-gradient(135deg, #ff5500 -124%, #7b31c7 224%)";
 
 const s = {
@@ -1339,6 +1434,56 @@ const s = {
     background: "rgba(255,255,255,0.04)",
     color: "#8888aa", cursor: "pointer", fontSize: "0.82rem",
     transition: "border-color 0.15s",
+  },
+
+  // ── Your Snippets ──
+  snippetCard: {
+    background: "#13131f",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.07)",
+    overflow: "hidden",
+  },
+  snippetCardHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.65rem",
+    padding: "0.7rem 0.85rem",
+    borderBottom: "1px solid rgba(255,255,255,0.05)",
+  },
+  snippetArt: { width: 38, height: 38, borderRadius: 6, objectFit: "cover", flexShrink: 0 },
+  snippetArtFallback: { width: 38, height: 38, borderRadius: 6, background: "#1e1e2e", flexShrink: 0 },
+  snippetTrackMeta: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 },
+  snippetTrackName: { fontSize: "0.88rem", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#f0f0f5" },
+  snippetTrackArtist: { fontSize: "0.73rem", color: "#5a5a78" },
+  snippetList: { display: "flex", flexDirection: "column" },
+  snippetRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    padding: "0.45rem 0.85rem",
+    borderBottom: "1px solid rgba(255,255,255,0.03)",
+  },
+  snippetEditInput: {
+    flex: 1,
+    padding: "0.3rem 0.6rem",
+    borderRadius: 8,
+    border: "1px solid rgba(255,85,0,0.4)",
+    background: "rgba(255,85,0,0.08)",
+    color: "#f0f0f5",
+    fontSize: "0.82rem",
+    outline: "none",
+    minWidth: 0,
+  },
+  snippetSaveBtn: {
+    background: "none", border: "none", color: "#ff5500",
+    cursor: "pointer", fontSize: "0.88rem", padding: "0 0.15rem",
+    flexShrink: 0, lineHeight: 1, fontWeight: 700,
+  },
+  editBtn: {
+    background: "none", border: "none", color: "#3a3a58",
+    cursor: "pointer", fontSize: "0.78rem", padding: "0 0.15rem",
+    flexShrink: 0, lineHeight: 1,
+    transition: "color 0.15s",
   },
 
   // ── Device Picker ──

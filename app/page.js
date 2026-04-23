@@ -13,6 +13,7 @@ import {
   setVolume,
   seekToPosition,
   getDevices,
+  searchTracks,
 } from "../lib/snippet";
 import {
   fetchAllTimestamps,
@@ -85,6 +86,10 @@ export default function Home() {
   // Snippet editing
   const [editingSnippet, setEditingSnippet] = useState(null); // { trackId, index, label }
   const [editLabel, setEditLabel] = useState("");
+
+  // Spotify global search
+  const [spotifyResults, setSpotifyResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
 
   // ── Token refresh ───────────────────────────────────────────────────────────
 
@@ -258,6 +263,35 @@ export default function Home() {
     if (!token || playlists.length > 0) return;
     getUserPlaylists(token).then(setPlaylists);
   }, [token, playlists.length]);
+
+  // Spotify global search — fires when on Search tab, debounced 350ms
+  useEffect(() => {
+    if (activeTab !== "search" || !searchQuery) {
+      setSpotifyResults([]);
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    const id = setTimeout(async () => {
+      try {
+        let t = getStoredToken();
+        if (!t) { setSearchLoading(false); return; }
+        let results = await searchTracks(t, searchQuery);
+        setSpotifyResults(results);
+      } catch (err) {
+        if (err.message === "TOKEN_EXPIRED") {
+          const newToken = await doRefresh();
+          if (newToken) {
+            const results = await searchTracks(newToken, searchQuery).catch(() => []);
+            setSpotifyResults(results);
+          }
+        }
+      } finally {
+        setSearchLoading(false);
+      }
+    }, 350);
+    return () => clearTimeout(id);
+  }, [searchQuery, activeTab, doRefresh]);
 
   // When searching, eagerly load liked tracks and all playlist tracks
   useEffect(() => {
@@ -952,57 +986,52 @@ export default function Home() {
               <p style={s.tabHeading}>Search</p>
               <input
                 style={{ ...s.searchInput, fontSize: "0.95rem", padding: "0.7rem 1rem", marginBottom: "1.25rem" }}
-                placeholder="Search songs, artists…"
+                placeholder="Search all of Spotify…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 autoFocus
               />
               {!searchQuery ? (
                 <p style={{ ...s.muted, textAlign: "center", marginTop: "3rem" }}>
-                  Start typing to search your library
+                  Search any song or artist on Spotify
                 </p>
+              ) : searchLoading ? (
+                <p style={{ ...s.muted, textAlign: "center", marginTop: "3rem" }}>Searching…</p>
+              ) : spotifyResults.length === 0 ? (
+                <p style={{ ...s.muted, textAlign: "center", marginTop: "3rem" }}>No results for "{searchQuery}"</p>
               ) : (
                 <div style={s.libraryBody}>
-                  {[
-                    ...(likedTracks || []),
-                    ...Object.values(playlistTracks).flat(),
-                  ]
-                    .filter((t, i, all) => all.findIndex((x) => x.id === t.id) === i)
-                    .filter((t) => {
-                      const q = searchQuery.toLowerCase();
-                      return t.name.toLowerCase().includes(q) || t.artists.toLowerCase().includes(q);
-                    })
-                    .map((track) => {
-                      const tss = allTimestamps[track.id] || [];
-                      return (
-                        <div key={track.id} style={s.trackRow}>
-                          <div style={{ ...s.trackLeft, cursor: "pointer" }} onClick={() => setSelectedTrack(track)}>
-                            {track.albumArt ? (
-                              <img src={track.albumArt} alt="" style={s.trackArt} />
-                            ) : (
-                              <div style={s.trackArtFallback} />
+                  {spotifyResults.map((track) => {
+                    const tss = allTimestamps[track.id] || [];
+                    return (
+                      <div key={track.id} style={s.trackRow}>
+                        <div style={{ ...s.trackLeft, cursor: "pointer" }} onClick={() => setSelectedTrack(track)}>
+                          {track.albumArt ? (
+                            <img src={track.albumArt} alt="" style={s.trackArt} />
+                          ) : (
+                            <div style={s.trackArtFallback} />
+                          )}
+                          <div style={s.trackMeta}>
+                            <span style={s.trackRowName}>{track.name}</span>
+                            <span style={s.trackRowArtist}>{track.artists}</span>
+                            {tss.length > 0 && (
+                              <div style={s.chipRow}>
+                                {tss.map((ts, i) => (
+                                  <button key={i} style={s.chip} onClick={() => jump(track.uri, ts.positionMs)} title={ts.label}>
+                                    {ts.label}
+                                  </button>
+                                ))}
+                              </div>
                             )}
-                            <div style={s.trackMeta}>
-                              <span style={s.trackRowName}>{track.name}</span>
-                              <span style={s.trackRowArtist}>{track.artists}</span>
-                              {tss.length > 0 && (
-                                <div style={s.chipRow}>
-                                  {tss.map((ts, i) => (
-                                    <button key={i} style={s.chip} onClick={() => jump(track.uri, ts.positionMs)} title={ts.label}>
-                                      {ts.label}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                          <div style={s.trackRight}>
-                            <span style={s.trackDuration}>{formatMs(track.durationMs)}</span>
-                            <button style={s.playTrackBtn} onClick={() => jump(track.uri, 0)} title="Play from start">▶</button>
                           </div>
                         </div>
-                      );
-                    })}
+                        <div style={s.trackRight}>
+                          <span style={s.trackDuration}>{formatMs(track.durationMs)}</span>
+                          <button style={s.playTrackBtn} onClick={() => jump(track.uri, 0)} title="Play from start">▶</button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

@@ -5,7 +5,10 @@
 body {
   margin: 0;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  background: #0a0a10;
+  background:
+    radial-gradient(circle at top, rgba(90, 24, 154, 0.18), transparent 28%),
+    radial-gradient(circle at 20% 120%, rgba(60, 9, 108, 0.28), transparent 34%),
+    linear-gradient(180deg, #0a060f 0%, #08050c 100%);
   color: #f0f0f5;
   min-height: 100vh;
 }
@@ -26,7 +29,7 @@ input[type="range"]::-webkit-slider-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #ff5500;
+  background: #E0AAFF;
   cursor: pointer;
   transition: transform 0.15s;
 }
@@ -39,7 +42,7 @@ input[type="range"]::-moz-range-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #ff5500;
+  background: #E0AAFF;
   cursor: pointer;
   border: none;
 }
@@ -51,12 +54,12 @@ input[type="range"]::-moz-range-thumb {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #ff5500;
+  background: #9D4EDD;
   border-radius: 3px;
 }
 
 ::selection {
-  background: rgba(255, 85, 0, 0.35);
+  background: rgba(224, 170, 255, 0.35);
 }
 
 /* Pulsing play button */
@@ -70,5 +73,169 @@ input[type="range"]::-moz-range-thumb {
 @keyframes playPulse {
   100% {
     box-shadow: 0 0 0 45px rgba(193, 244, 246, 0);
+  }
+}
+
+.search-orb-container {
+  position: relative;
+  width: min(100%, 400px);
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+}
+
+.gooey-background-layer {
+  position: absolute;
+  inset: 0;
+  filter: url("#enhanced-goo");
+  z-index: 1;
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  transition: all 0.8s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.blob-1 {
+  width: 140px;
+  height: 72px;
+  left: 0;
+  top: 0;
+  background: linear-gradient(135deg, #1c0b2d, #5A189A);
+  animation: blob-float 6s infinite alternate ease-in-out;
+}
+
+.blob-2 {
+  width: 120px;
+  height: 72px;
+  right: 0;
+  top: 0;
+  background: linear-gradient(135deg, #5A189A, #3c096c);
+  animation: blob-float 8s infinite alternate-reverse ease-in-out;
+}
+
+.blob-3 {
+  width: 200px;
+  height: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(135deg, #3c096c, #240046);
+  opacity: 0.95;
+}
+
+.blob-bridge {
+  position: absolute;
+  height: 40px;
+  width: 80%;
+  left: 10%;
+  top: 16px;
+  background: #3c096c;
+  border-radius: 40px;
+}
+
+.input-overlay {
+  position: relative;
+  z-index: 10;
+  width: calc(100% - 28px);
+  height: 52px;
+  background: rgba(10, 7, 14, 0.52);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(224, 170, 255, 0.14);
+  border-radius: 26px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.34);
+  transition: all 0.4s cubic-bezier(0.165, 0.84, 0.44, 1);
+}
+
+.modern-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  color: white;
+  font-size: 15px;
+  font-weight: 500;
+  padding-left: 12px;
+  letter-spacing: 0.02em;
+}
+
+.modern-input::placeholder {
+  color: rgba(255, 255, 255, 0.62);
+  font-weight: 400;
+}
+
+.search-icon-wrapper {
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.92;
+}
+
+.search-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.focus-indicator {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0%;
+  height: 2px;
+  background: white;
+  transform: translateX(-50%);
+  transition: width 0.4s ease;
+  border-radius: 2px;
+  box-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
+}
+
+.search-orb-container:focus-within .input-overlay {
+  transform: translateY(-4px);
+  background: rgba(14, 10, 20, 0.72);
+  border-color: rgba(224, 170, 255, 0.26);
+  box-shadow: 0 22px 42px rgba(0, 0, 0, 0.42);
+}
+
+.search-orb-container:focus-within .focus-indicator {
+  width: 40%;
+}
+
+.search-orb-container:focus-within .blob-1 {
+  transform: scale(1.15) translateX(-20px);
+  filter: brightness(1.1);
+}
+
+.search-orb-container:focus-within .blob-2 {
+  transform: scale(1.15) translateX(20px);
+  filter: brightness(1.08);
+}
+
+.gooey-svg-filter {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+@keyframes blob-float {
+  0% {
+    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+    transform: translate(0, 0);
+  }
+  50% {
+    border-radius: 60% 40% 50% 50% / 30% 60% 40% 70%;
+    transform: translate(5px, -5px);
+  }
+  100% {
+    border-radius: 50% 50% 30% 70% / 60% 40% 60% 40%;
+    transform: translate(-5px, 5px);
   }
 }

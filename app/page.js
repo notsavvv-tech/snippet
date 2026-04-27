@@ -43,6 +43,17 @@ function getStoredExpiry() {
   return v ? Number(v) : null;
 }
 
+function getNativeSpotifyBridge() {
+  if (typeof window === "undefined") return null;
+  const capacitor = window.Capacitor;
+  const isNative =
+    typeof capacitor?.isNativePlatform === "function"
+      ? capacitor.isNativePlatform()
+      : false;
+  if (!isNative) return null;
+  return capacitor?.Plugins?.SpotifyBridge ?? null;
+}
+
 export default function Home() {
   const [token, setToken] = useState(null);
   const [hydrated, setHydrated] = useState(false);
@@ -91,6 +102,8 @@ export default function Home() {
   // Spotify global search
   const [spotifyResults, setSpotifyResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const nativeSpotifyBridge = getNativeSpotifyBridge();
+  const isNativeApp = Boolean(nativeSpotifyBridge);
 
   // ── Token refresh ───────────────────────────────────────────────────────────
 
@@ -123,6 +136,23 @@ export default function Home() {
     console.log("[doRefresh] token refreshed, expires in", data.expires_in, "s");
     return newToken;
   }, []);
+
+  const withFreshToken = useCallback(
+    async (requestFn) => {
+      let currentToken = getStoredToken();
+      if (!currentToken) return null;
+
+      try {
+        return await requestFn(currentToken);
+      } catch (err) {
+        if (err.message !== "TOKEN_EXPIRED") throw err;
+        const newToken = await doRefresh();
+        if (!newToken) return null;
+        return requestFn(newToken);
+      }
+    },
+    [doRefresh]
+  );
 
   // Proactive refresh: fire 5 minutes before expiry
   useEffect(() => {
@@ -222,6 +252,7 @@ export default function Home() {
 
   // Fetch available devices whenever playerState is null (nothing active)
   const fetchDevices = useCallback(async () => {
+    if (isNativeApp) return;
     const t = getStoredToken();
     if (!t) return;
     setLoadingDevices(true);
@@ -230,7 +261,7 @@ export default function Home() {
     setLoadingDevices(false);
     // Auto-select if only one device available
     if (list.length === 1 && !deviceId) setDeviceId(list[0].id);
-  }, [deviceId]);
+  }, [deviceId, isNativeApp]);
 
   // Initial fetch + auto-poll every 5s while nothing is playing
   useEffect(() => {
@@ -262,8 +293,12 @@ export default function Home() {
 
   useEffect(() => {
     if (!token || playlists.length > 0) return;
-    getUserPlaylists(token).then(setPlaylists);
-  }, [token, playlists.length]);
+    withFreshToken((accessToken) => getUserPlaylists(accessToken))
+      .then((items) => {
+        if (items) setPlaylists(items);
+      })
+      .catch((err) => console.warn("[playlists] failed to load", err));
+  }, [token, playlists.length, withFreshToken]);
 
   // Spotify global search — fires when on Search tab, debounced 350ms
   useEffect(() => {
@@ -297,28 +332,37 @@ export default function Home() {
   // When searching, eagerly load liked tracks and all playlist tracks
   useEffect(() => {
     if (!searchQuery) return;
-    const t = getStoredToken();
-    if (!t) return;
     if (likedTracks === null) {
-      getLikedTracks(t).then(setLikedTracks);
+      withFreshToken((accessToken) => getLikedTracks(accessToken))
+        .then((tracks) => {
+          if (tracks) setLikedTracks(tracks);
+        })
+        .catch((err) => console.warn("[likedTracks] failed to load", err));
     }
     playlists.forEach((pl) => {
       if (!playlistTracks[pl.id]) {
-        getPlaylistTracks(t, pl.id).then(({ tracks }) => {
-          setPlaylistTracks((prev) => ({ ...prev, [pl.id]: tracks }));
-        });
+        withFreshToken((accessToken) => getPlaylistTracks(accessToken, pl.id))
+          .then((result) => {
+            if (!result) return;
+            setPlaylistTracks((prev) => ({ ...prev, [pl.id]: result.tracks }));
+            if (result.forbidden) {
+              setPlaylistErrors((prev) => ({
+                ...prev,
+                [pl.id]: "This playlist can't be accessed. It may be private or managed by Spotify.",
+              }));
+            }
+          })
+          .catch((err) => console.warn("[playlistTracks] failed to preload", pl.id, err));
       }
     });
-  }, [searchQuery, playlists]);
+  }, [searchQuery, playlists, likedTracks, playlistTracks, withFreshToken]);
 
   const handleToggleLiked = useCallback(async () => {
     setLikedOpen((o) => !o);
     if (likedTracks !== null) return; // already loaded
-    const t = getStoredToken();
-    if (!t) return;
-    const tracks = await getLikedTracks(t);
-    setLikedTracks(tracks);
-  }, [likedTracks]);
+    const tracks = await withFreshToken((accessToken) => getLikedTracks(accessToken));
+    if (tracks) setLikedTracks(tracks);
+  }, [likedTracks, withFreshToken]);
 
   const handleTogglePlaylist = useCallback(
     async (playlistId) => {
@@ -328,27 +372,52 @@ export default function Home() {
       }
       setOpenPlaylistId(playlistId);
       if (playlistTracks[playlistId]) return; // already cached
-      const t = getStoredToken();
-      if (!t) return;
       setLoadingPlaylistId(playlistId);
-      const { tracks, forbidden } = await getPlaylistTracks(t, playlistId);
-      setPlaylistTracks((prev) => ({ ...prev, [playlistId]: tracks }));
-      if (forbidden) {
-        setPlaylistErrors((prev) => ({ ...prev, [playlistId]: "This playlist can't be accessed. It may be private or managed by Spotify." }));
+      const result = await withFreshToken((accessToken) => getPlaylistTracks(accessToken, playlistId))
+        .catch((err) => {
+          console.warn("[playlistTracks] failed to load", playlistId, err);
+          return null;
+        });
+      if (result) {
+        setPlaylistTracks((prev) => ({ ...prev, [playlistId]: result.tracks }));
+        if (result.forbidden) {
+          setPlaylistErrors((prev) => ({ ...prev, [playlistId]: "This playlist can't be accessed. It may be private or managed by Spotify." }));
+        }
       }
       setLoadingPlaylistId(null);
     },
-    [openPlaylistId, playlistTracks]
+    [openPlaylistId, playlistTracks, withFreshToken]
   );
 
   // ── Playback ─────────────────────────────────────────────────────────────────
 
   const jump = useCallback(async (trackUri, positionMs) => {
     if (!trackUri || trackUri.startsWith("spotify:local:")) return;
+    const nativeSpotifyBridge = getNativeSpotifyBridge();
+    if (nativeSpotifyBridge?.connectAndPlay) {
+      try {
+        await nativeSpotifyBridge.connectAndPlay({ uri: trackUri, positionMs });
+        lastPollRef.current = { time: Date.now(), positionMs, isPlaying: true };
+        setEstimatedPos(positionMs);
+        return;
+      } catch (err) {
+        const message = String(err?.message || err || "");
+        console.warn("[nativeSpotifyBridge.connectAndPlay] failed", message);
+        if (message.includes("SPOTIFY_NOT_INSTALLED")) {
+          alert("Open the Spotify app on this phone first, then try again.");
+          return;
+        }
+        if (message.includes("SPOTIFY_NOT_PREMIUM")) {
+          alert("Spotify Premium is required for playback control.");
+          return;
+        }
+      }
+    }
+
     const t = getStoredToken();
     if (!t) return;
-    // Prefer browser SDK player, then manually selected device, then active player
-    const targetDevice = playerState ? null : (webPlayerId || deviceId);
+    // Always prefer the device running this app before falling back to Spotify's active player.
+    const targetDevice = webPlayerId || deviceId || null;
     const res = await playSnippet(t, { trackUri, positionMs, deviceId: targetDevice });
     if (res.status === 204 || res.ok) {
       lastPollRef.current = { time: Date.now(), positionMs, isPlaying: true };
@@ -365,7 +434,7 @@ export default function Home() {
         return;
       }
       // Retry once with the new token
-      const retry = await playSnippet(newToken, { trackUri, positionMs });
+      const retry = await playSnippet(newToken, { trackUri, positionMs, deviceId: targetDevice });
       if (retry.status === 204 || retry.ok) {
         lastPollRef.current = { time: Date.now(), positionMs, isPlaying: true };
         setEstimatedPos(positionMs);
@@ -394,14 +463,31 @@ export default function Home() {
   }, [playerState?.volumePercent, volume]);
 
   const handlePlayPause = useCallback(async () => {
-    const t = getStoredToken();
-    if (!t || !playerState) return;
+    if (!playerState) return;
+    const nativeSpotifyBridge = getNativeSpotifyBridge();
+    if (nativeSpotifyBridge) {
+      if (playerState.isPlaying && nativeSpotifyBridge.pause) {
+        await nativeSpotifyBridge.pause().catch((err) => {
+          console.warn("[nativeSpotifyBridge.pause] failed", err);
+        });
+      } else if (!playerState.isPlaying && nativeSpotifyBridge.resume) {
+        await nativeSpotifyBridge.resume().catch((err) => {
+          console.warn("[nativeSpotifyBridge.resume] failed", err);
+        });
+      }
+    } else {
+      const t = getStoredToken();
+      if (!t) return;
+      if (playerState.isPlaying) {
+        await pausePlayback(t);
+      } else {
+        await resumePlayback(t);
+      }
+    }
     if (playerState.isPlaying) {
-      await pausePlayback(t);
       setPlayerState((prev) => prev ? { ...prev, isPlaying: false } : prev);
       if (lastPollRef.current) lastPollRef.current.isPlaying = false;
     } else {
-      await resumePlayback(t);
       setPlayerState((prev) => prev ? { ...prev, isPlaying: true } : prev);
       if (lastPollRef.current) {
         lastPollRef.current.isPlaying = true;
@@ -417,8 +503,15 @@ export default function Home() {
 
   const handleSeekCommit = useCallback(async (e) => {
     const posMs = Number(e.target.value);
-    const t = getStoredToken();
-    if (t) await seekToPosition(t, posMs);
+    const nativeSpotifyBridge = getNativeSpotifyBridge();
+    if (nativeSpotifyBridge?.seek) {
+      await nativeSpotifyBridge.seek({ positionMs: posMs }).catch((err) => {
+        console.warn("[nativeSpotifyBridge.seek] failed", err);
+      });
+    } else {
+      const t = getStoredToken();
+      if (t) await seekToPosition(t, posMs);
+    }
     if (lastPollRef.current) {
       lastPollRef.current.positionMs = posMs;
       lastPollRef.current.time = Date.now();
@@ -525,8 +618,8 @@ export default function Home() {
         <svg viewBox="46 13.5 38 7" style={{ height: "68px", width: "auto", flexShrink: 0, display: "block", margin: "0 auto" }}>
           <defs>
             <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#ff5500" />
-              <stop offset="100%" stopColor="#7b31c7" />
+              <stop offset="0%" stopColor="#E0AAFF" />
+              <stop offset="100%" stopColor="#3c096c" />
             </linearGradient>
             <filter id="invertFilter" colorInterpolationFilters="sRGB">
               <feColorMatrix type="matrix" values="-1 0 0 0 1  0 -1 0 0 1  0 0 -1 0 1  0 0 0 1 0" />
@@ -571,7 +664,14 @@ export default function Home() {
           {activeTab === "home" && (<>
           {/* ── Now Playing ── */}
           {!playerState ? (
-            webPlayerId ? (
+            isNativeApp ? (
+              <div style={s.devicePicker}>
+                <p style={s.devicePickerHeading}>Ready to play on this device</p>
+                <p style={{ ...s.muted, fontSize: "0.82rem" }}>
+                  Tap ▶ on any track below — Snippet will try to play through Spotify on this phone.
+                </p>
+              </div>
+            ) : webPlayerId ? (
               <div style={s.devicePicker}>
                 <p style={s.devicePickerHeading}>Ready to play</p>
                 <p style={{ ...s.muted, fontSize: "0.82rem" }}>
@@ -985,13 +1085,55 @@ export default function Home() {
           {activeTab === "search" && (
             <div style={s.searchTab}>
               <p style={s.tabHeading}>Search</p>
-              <input
-                style={{ ...s.searchInput, fontSize: "0.95rem", padding: "0.7rem 1rem", marginBottom: "1.25rem" }}
-                placeholder="Search all of Spotify…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                autoFocus
-              />
+              <div style={s.searchOrbWrap}>
+                <div className="search-orb-container">
+                  <div className="gooey-background-layer">
+                    <div className="blob blob-1" />
+                    <div className="blob blob-2" />
+                    <div className="blob blob-3" />
+                    <div className="blob-bridge" />
+                  </div>
+                  <div className="input-overlay">
+                    <div className="search-icon-wrapper">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="search-icon"
+                      >
+                        <circle cx={11} cy={11} r={8} />
+                        <line x1={21} y1={21} x2="16.65" y2="16.65" />
+                      </svg>
+                    </div>
+                    <input
+                      type="text"
+                      className="modern-input"
+                      placeholder="Explore the digital void..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      autoFocus
+                    />
+                    <div className="focus-indicator" />
+                  </div>
+                  <svg className="gooey-svg-filter" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                      <filter id="enhanced-goo">
+                        <feGaussianBlur in="SourceGraphic" stdDeviation={12} result="blur" />
+                        <feColorMatrix
+                          in="blur"
+                          mode="matrix"
+                          values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -10"
+                          result="goo"
+                        />
+                        <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+                      </filter>
+                    </defs>
+                  </svg>
+                </div>
+              </div>
               {!searchQuery ? (
                 <p style={{ ...s.muted, textAlign: "center", marginTop: "3rem" }}>
                   Search any song or artist on Spotify
@@ -1228,8 +1370,8 @@ export default function Home() {
   );
 }
 
-const ORANGE = "#ff5500";
-const GRAD = "linear-gradient(135deg, #ff5500 -124%, #7b31c7 224%)";
+const ORANGE = "#E0AAFF";
+const GRAD = "linear-gradient(135deg, #E0AAFF 0%, #9D4EDD 34%, #5A189A 72%, #3c096c 100%)";
 
 const s = {
   main: {
@@ -1242,10 +1384,11 @@ const s = {
     display: "flex", alignItems: "center",
     gap: "0.75rem", marginBottom: "2rem",
     padding: "1rem 1.25rem",
-    background: "rgba(255,255,255,0.03)",
+    background: "rgba(18, 8, 24, 0.82)",
     borderRadius: 16,
-    border: "1px solid rgba(255,255,255,0.06)",
-    backdropFilter: "blur(8px)",
+    border: "1px solid rgba(224,170,255,0.08)",
+    backdropFilter: "blur(16px)",
+    boxShadow: "0 14px 40px rgba(0,0,0,0.32)",
   },
   headerRight: { display: "flex", gap: "0.5rem", flexShrink: 0 },
   searchInput: {
@@ -1272,11 +1415,12 @@ const s = {
 
   // ── Now Playing card ──
   card: {
-    background: "#13131f",
+    background: "#120818",
     borderRadius: 18,
-    border: "1px solid rgba(255,255,255,0.07)",
+    border: "1px solid rgba(224,170,255,0.08)",
     marginBottom: "1.5rem",
     overflow: "hidden",
+    boxShadow: "0 18px 44px rgba(0,0,0,0.34)",
   },
   cardGradientBar: {
     height: 3,
@@ -1340,8 +1484,9 @@ const s = {
     display: "flex", alignItems: "center", gap: "1rem",
     marginBottom: "1rem",
     padding: "0.75rem 1rem",
-    background: "rgba(255,255,255,0.03)",
+    background: "rgba(255,255,255,0.025)",
     borderRadius: 12,
+    border: "1px solid rgba(224,170,255,0.05)",
   },
   playPauseBtn: {
     background: GRAD,
@@ -1373,9 +1518,9 @@ const s = {
   },
   listItem: {
     display: "flex", alignItems: "center", gap: "0.5rem",
-    background: "rgba(255,255,255,0.04)",
+    background: "rgba(255,255,255,0.028)",
     borderRadius: 10, padding: "0.55rem 0.85rem",
-    border: "1px solid rgba(255,255,255,0.05)",
+    border: "1px solid rgba(224,170,255,0.05)",
     transition: "background 0.15s",
   },
   jumpBtn: {
@@ -1405,8 +1550,8 @@ const s = {
 
   playlistWrap: {
     borderRadius: 12, overflow: "hidden",
-    border: "1px solid rgba(255,255,255,0.06)",
-    background: "#13131f",
+    border: "1px solid rgba(224,170,255,0.07)",
+    background: "#120818",
   },
   playlistRow: {
     width: "100%", display: "flex", alignItems: "center", gap: "0.75rem",
@@ -1422,8 +1567,8 @@ const s = {
   },
   likedArt: {
     width: 42, height: 42, borderRadius: 8, flexShrink: 0,
-    background: "#1e1e2e",
-    border: "1px solid rgba(255,85,0,0.25)",
+    background: "#1a1121",
+    border: "1px solid rgba(224,170,255,0.2)",
     display: "flex", alignItems: "center",
     justifyContent: "center", fontSize: "1.1rem",
   },
@@ -1435,8 +1580,8 @@ const s = {
   playlistCount: { fontSize: "0.73rem", color: "#5a5a78" },
 
   trackList: {
-    background: "rgba(0,0,0,0.25)",
-    borderTop: "1px solid rgba(255,255,255,0.05)",
+    background: "rgba(5,2,8,0.46)",
+    borderTop: "1px solid rgba(224,170,255,0.05)",
   },
   trackRow: {
     display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1458,9 +1603,9 @@ const s = {
   chipRow: { display: "flex", flexWrap: "wrap", gap: "0.3rem", marginTop: "0.3rem" },
   chip: {
     padding: "0.15rem 0.55rem", borderRadius: 20,
-    background: "rgba(255,85,0,0.12)",
-    border: `1px solid rgba(255,85,0,0.35)`,
-    color: "#ff7733", fontSize: "0.7rem", cursor: "pointer",
+    background: "rgba(224,170,255,0.08)",
+    border: "1px solid rgba(224,170,255,0.22)",
+    color: "#f0d2ff", fontSize: "0.7rem", cursor: "pointer",
     whiteSpace: "nowrap", maxWidth: 120,
     overflow: "hidden", textOverflow: "ellipsis",
     transition: "background 0.15s",
@@ -1469,7 +1614,7 @@ const s = {
   trackDuration: { fontSize: "0.73rem", color: "#3a3a58" },
   playTrackBtn: {
     width: 32, height: 32, borderRadius: "50%",
-    background: "linear-gradient(30deg, rgb(255, 130, 0) 20%, rgb(255, 38, 0) 80%)",
+    background: "linear-gradient(30deg, #E0AAFF 5%, #9D4EDD 45%, #5A189A 72%, #3c096c 100%)",
     border: "none", color: "#fff",
     cursor: "pointer",
     display: "flex", alignItems: "center", justifyContent: "center",
@@ -1494,17 +1639,17 @@ const s = {
   },
   btnGhost: {
     padding: "0.45rem 0.85rem", borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.04)",
-    color: "#8888aa", cursor: "pointer", fontSize: "0.82rem",
+    border: "1px solid rgba(224,170,255,0.09)",
+    background: "rgba(255,255,255,0.025)",
+    color: "#bca5cc", cursor: "pointer", fontSize: "0.82rem",
     transition: "border-color 0.15s",
   },
 
   // ── Your Snippets ──
   snippetCard: {
-    background: "#13131f",
+    background: "#120818",
     borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.07)",
+    border: "1px solid rgba(224,170,255,0.07)",
     overflow: "hidden",
   },
   snippetCardHeader: {
@@ -1531,15 +1676,15 @@ const s = {
     flex: 1,
     padding: "0.3rem 0.6rem",
     borderRadius: 8,
-    border: "1px solid rgba(255,85,0,0.4)",
-    background: "rgba(255,85,0,0.08)",
+    border: "1px solid rgba(224,170,255,0.28)",
+    background: "rgba(224,170,255,0.06)",
     color: "#f0f0f5",
     fontSize: "0.82rem",
     outline: "none",
     minWidth: 0,
   },
   snippetSaveBtn: {
-    background: "none", border: "none", color: "#ff5500",
+    background: "none", border: "none", color: "#E0AAFF",
     cursor: "pointer", fontSize: "0.88rem", padding: "0 0.15rem",
     flexShrink: 0, lineHeight: 1, fontWeight: 700,
   },
@@ -1552,11 +1697,12 @@ const s = {
 
   // ── Device Picker ──
   devicePicker: {
-    background: "#13131f",
+    background: "#120818",
     borderRadius: 18,
-    border: "1px solid rgba(255,255,255,0.07)",
+    border: "1px solid rgba(224,170,255,0.08)",
     padding: "1.25rem",
     marginBottom: "1.5rem",
+    boxShadow: "0 18px 44px rgba(0,0,0,0.32)",
   },
   devicePickerHeading: {
     fontSize: "1rem",
@@ -1576,8 +1722,8 @@ const s = {
     gap: "0.75rem",
     width: "100%",
     padding: "0.7rem 1rem",
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.07)",
+    background: "rgba(255,255,255,0.025)",
+    border: "1px solid rgba(224,170,255,0.06)",
     borderRadius: 12,
     color: "#c0c0d8",
     cursor: "pointer",
@@ -1586,13 +1732,13 @@ const s = {
     transition: "background 0.15s, border-color 0.15s",
   },
   deviceRowActive: {
-    background: "rgba(255,85,0,0.1)",
-    border: "1px solid rgba(255,85,0,0.35)",
+    background: "rgba(224,170,255,0.1)",
+    border: "1px solid rgba(224,170,255,0.24)",
     color: "#f0f0f5",
   },
   deviceIcon: { fontSize: "1.1rem", flexShrink: 0 },
   deviceName: { flex: 1, fontWeight: 500 },
-  deviceCheck: { color: "#ff5500", fontWeight: 700, fontSize: "0.9rem" },
+  deviceCheck: { color: "#E0AAFF", fontWeight: 700, fontSize: "0.9rem" },
 
   // ── Bottom Nav ──
   bottomNav: {
@@ -1605,12 +1751,12 @@ const s = {
     justifyContent: "center",
     gap: "2.25rem",
     padding: "0.875rem 2.75rem",
-    background: "rgba(12, 12, 20, 0.88)",
+    background: "rgba(10, 6, 14, 0.9)",
     backdropFilter: "blur(24px)",
     WebkitBackdropFilter: "blur(24px)",
     borderRadius: 9999,
-    border: "1px solid rgba(255,255,255,0.1)",
-    boxShadow: "0 8px 40px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.06)",
+    border: "1px solid rgba(224,170,255,0.1)",
+    boxShadow: "0 10px 42px rgba(0,0,0,0.62), 0 2px 8px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.04)",
     zIndex: 50,
   },
   navBtn: {
@@ -1627,13 +1773,18 @@ const s = {
     borderRadius: 8,
   },
   navBtnActive: {
-    color: "#ffffff",
-    filter: "drop-shadow(0 0 8px rgba(255,255,255,0.35))",
+    color: "#E0AAFF",
+    filter: "drop-shadow(0 0 8px rgba(224,170,255,0.3))",
   },
 
   // ── Search Tab ──
   searchTab: {
     paddingTop: "0.25rem",
+  },
+  searchOrbWrap: {
+    marginBottom: "1.25rem",
+    display: "flex",
+    justifyContent: "center",
   },
   tabHeading: {
     fontSize: "1.35rem",
@@ -1682,7 +1833,7 @@ const s = {
   },
   modalSheet: {
     width: "100%", maxWidth: 600,
-    background: "#0a0a10",
+    background: "#120818",
     minHeight: "100%",
     padding: "0 1.5rem 6rem",
     display: "flex", flexDirection: "column",
@@ -1691,7 +1842,7 @@ const s = {
     display: "flex", alignItems: "center", justifyContent: "space-between",
     padding: "1.25rem 0 0.5rem",
     position: "sticky", top: 0,
-    background: "#0a0a10",
+    background: "#120818",
     zIndex: 1,
   },
   modalClose: {
@@ -1748,7 +1899,7 @@ const s = {
   },
   modalPlayPause: {
     width: 80, height: 80, borderRadius: "50%",
-    background: "linear-gradient(30deg, rgb(255, 130, 0) 20%, rgb(255, 38, 0) 80%)",
+    background: "linear-gradient(30deg, #E0AAFF 5%, #9D4EDD 45%, #5A189A 72%, #3c096c 100%)",
     border: "none",
     color: "#fff", cursor: "pointer",
     display: "flex", alignItems: "center", justifyContent: "center",

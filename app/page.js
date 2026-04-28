@@ -17,6 +17,7 @@ import {
   setVolume,
   seekToPosition,
   getDevices,
+  transferPlayback,
   searchTracks,
 } from "../lib/snippet";
 import {
@@ -64,14 +65,15 @@ export default function Home() {
   const [token, setToken] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [urlError, setUrlError] = useState(null);
-  const [authPending, setAuthPending] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState("home");
   const [pressedTab, setPressedTab] = useState(null);
 
   // Web Playback SDK — browser is the Spotify device
   const [webPlayerId, setWebPlayerId] = useState(null);
+  const webPlayerIdRef = useRef(null);
   const sdkPlayerRef = useRef(null);
+  const [webPlayerError, setWebPlayerError] = useState(null);
 
   // Device selection fallback (when SDK isn't available)
   const [devices, setDevices] = useState([]);
@@ -80,10 +82,13 @@ export default function Home() {
 
   // Now Playing
   const [playerState, setPlayerState] = useState(null);
+  const [previousPlayerTrack, setPreviousPlayerTrack] = useState(null);
   const [labelInput, setLabelInput] = useState("");
   const [estimatedPos, setEstimatedPos] = useState(0);
   const lastPollRef = useRef(null);
+  const lastPlayerTrackIdRef = useRef(null);
   const isSeekingRef = useRef(false);
+  const modalRingSeekRef = useRef({ active: false });
 
   // All timestamps for the logged-in user, keyed by trackId
   const [allTimestamps, setAllTimestamps] = useState({});
@@ -107,6 +112,7 @@ export default function Home() {
   const [editingSnippet, setEditingSnippet] = useState(null); // { trackId, index, label }
   const [editLabel, setEditLabel] = useState("");
   const [selectedSnippetIndexByTrack, setSelectedSnippetIndexByTrack] = useState({});
+  const [openSnippetTracks, setOpenSnippetTracks] = useState({});
   const [snippetModeEnabled, setSnippetModeEnabled] = useState(false);
   const [snippetsOpen, setSnippetsOpen] = useState(true);
   const [playlistsOpen, setPlaylistsOpen] = useState(true);
@@ -116,6 +122,10 @@ export default function Home() {
   const [searchLoading, setSearchLoading] = useState(false);
   const nativeSpotifyBridge = getNativeSpotifyBridge();
   const isNativeApp = Boolean(nativeSpotifyBridge);
+
+  useEffect(() => {
+    webPlayerIdRef.current = webPlayerId;
+  }, [webPlayerId]);
 
   // ── Token refresh ───────────────────────────────────────────────────────────
 
@@ -212,48 +222,12 @@ export default function Home() {
     if (storedSnippetMode === "true") setSnippetModeEnabled(true);
 
     const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-    const verifier = params.get("state");
     const err = params.get("error");
     const detail = params.get("detail");
     if (err) {
       if (!t) setUrlError(detail || err);
       window.history.replaceState({}, "", "/");
-      return;
     }
-    if (!code || !verifier) return;
-
-    setAuthPending(true);
-    fetch("/api/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, code_verifier: verifier }),
-    })
-      .then(async (res) => {
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error(data?.detail || data?.error || "Token exchange failed");
-        }
-        const accessToken = data.access_token;
-        const refreshToken = data.refresh_token;
-        const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
-        localStorage.setItem(STORAGE_KEY, accessToken);
-        localStorage.setItem(STORAGE_EXPIRES, String(expiresAt));
-        if (refreshToken) {
-          localStorage.setItem(STORAGE_REFRESH, refreshToken);
-        }
-        setToken(accessToken);
-        setUrlError(null);
-        window.history.replaceState({}, "", "/");
-      })
-      .catch((exchangeError) => {
-        console.warn("[callback] token exchange failed", exchangeError);
-        setUrlError(String(exchangeError?.message || exchangeError || "Token exchange failed"));
-        window.history.replaceState({}, "", "/");
-      })
-      .finally(() => {
-        setAuthPending(false);
-      });
   }, []);
 
   useEffect(() => {
@@ -273,8 +247,43 @@ export default function Home() {
         getOAuthToken: (cb) => cb(getStoredToken()),
         volume: 0.8,
       });
-      player.addListener("ready", ({ device_id }) => setWebPlayerId(device_id));
-      player.addListener("not_ready", () => setWebPlayerId(null));
+      player.addListener("ready", ({ device_id }) => {
+        console.log("[webPlayer] ready", device_id);
+        setWebPlayerError(null);
+        setWebPlayerId(device_id);
+      });
+      player.addListener("not_ready", ({ device_id }) => {
+        console.warn("[webPlayer] not_ready", device_id);
+        setWebPlayerId(null);
+      });
+      player.addListener("initialization_error", ({ message }) => {
+        console.warn("[webPlayer] initialization_error", message);
+        setWebPlayerError({
+          type: "initialization_error",
+          message,
+        });
+      });
+      player.addListener("authentication_error", ({ message }) => {
+        console.warn("[webPlayer] authentication_error", message);
+        setWebPlayerError({
+          type: "authentication_error",
+          message,
+        });
+      });
+      player.addListener("account_error", ({ message }) => {
+        console.warn("[webPlayer] account_error", message);
+        setWebPlayerError({
+          type: "account_error",
+          message,
+        });
+      });
+      player.addListener("playback_error", ({ message }) => {
+        console.warn("[webPlayer] playback_error", message);
+        setWebPlayerError({
+          type: "playback_error",
+          message,
+        });
+      });
       player.connect();
       sdkPlayerRef.current = player;
     };
@@ -362,6 +371,17 @@ export default function Home() {
     const id = setInterval(loadQueue, 5000);
     return () => clearInterval(id);
   }, [token, playerState?.id, withFreshToken]);
+
+  useEffect(() => {
+    if (!playerState?.id) return;
+    if (lastPlayerTrackIdRef.current && lastPlayerTrackIdRef.current !== playerState.id) {
+      const priorTrack = trackLookup[lastPlayerTrackIdRef.current];
+      if (priorTrack) {
+        setPreviousPlayerTrack(priorTrack);
+      }
+    }
+    lastPlayerTrackIdRef.current = playerState.id;
+  }, [playerState?.id]);
 
   // Smooth position estimate between polls
   useEffect(() => {
@@ -492,6 +512,36 @@ export default function Home() {
 
   // ── Playback ─────────────────────────────────────────────────────────────────
 
+  const ensureBrowserPlaybackDevice = useCallback(async () => {
+    if (isNativeApp || typeof window === "undefined") return null;
+    if (webPlayerIdRef.current) return webPlayerIdRef.current;
+
+    if (window.Spotify && !sdkPlayerRef.current) {
+      window.onSpotifyWebPlaybackSDKReady?.();
+    }
+
+    const waitUntil = Date.now() + 3500;
+    while (!webPlayerIdRef.current && Date.now() < waitUntil) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    if (webPlayerIdRef.current) return webPlayerIdRef.current;
+
+    const t = getStoredToken();
+    if (!t) return null;
+    const list = await getDevices(t).catch(() => []);
+    const snippetDevice =
+      list.find((device) => device.name === "Snippet") ??
+      list.find((device) => device.id === webPlayerIdRef.current) ??
+      null;
+    if (snippetDevice) {
+      setDeviceId(snippetDevice.id);
+      return snippetDevice.id;
+    }
+
+    return null;
+  }, [isNativeApp]);
+
   const jump = useCallback(async (trackOrUri, positionMs, playbackContext = null) => {
     const trackUri = typeof trackOrUri === "string" ? trackOrUri : trackOrUri?.uri;
     const contextSource =
@@ -522,8 +572,23 @@ export default function Home() {
 
     const t = getStoredToken();
     if (!t) return;
+    const browserDeviceId = await ensureBrowserPlaybackDevice();
     // Always prefer the device running this app before falling back to Spotify's active player.
-    const targetDevice = webPlayerId || deviceId || null;
+    const targetDevice = browserDeviceId || webPlayerIdRef.current || deviceId || null;
+    if ((browserDeviceId || webPlayerIdRef.current) && sdkPlayerRef.current?.activateElement) {
+      try {
+        await sdkPlayerRef.current.activateElement();
+      } catch (err) {
+        console.warn("[webPlayer.activateElement] failed", err);
+      }
+    }
+    if (browserDeviceId || webPlayerIdRef.current) {
+      try {
+        await transferPlayback(t, browserDeviceId || webPlayerIdRef.current, false);
+      } catch (err) {
+        console.warn("[transferPlayback] failed", err);
+      }
+    }
     const request = {
       trackUri,
       positionMs,
@@ -548,6 +613,13 @@ export default function Home() {
         return;
       }
       // Retry once with the new token
+      if (browserDeviceId || webPlayerIdRef.current) {
+        try {
+          await transferPlayback(newToken, browserDeviceId || webPlayerIdRef.current, false);
+        } catch (err) {
+          console.warn("[transferPlayback retry] failed", err);
+        }
+      }
       const retry = await playSnippet(newToken, request);
       if (retry.status === 204 || retry.ok) {
         lastPollRef.current = { time: Date.now(), positionMs, isPlaying: true };
@@ -563,7 +635,7 @@ export default function Home() {
     if (res.status === 403) {
       alert("Spotify Premium is required for playback control.");
     }
-  }, [playerState, deviceId, webPlayerId, doRefresh, fetchDevices]);
+  }, [deviceId, doRefresh, ensureBrowserPlaybackDevice, fetchDevices]);
 
   // ── Volume (local optimistic state) ─────────────────────────────────────────
 
@@ -632,6 +704,61 @@ export default function Home() {
     }
     isSeekingRef.current = false;
   }, []);
+
+  const commitSeekPosition = useCallback(async (posMs) => {
+    const clamped = Math.max(0, Math.floor(posMs));
+    const nativeSpotifyBridge = getNativeSpotifyBridge();
+    if (nativeSpotifyBridge?.seek) {
+      await nativeSpotifyBridge.seek({ positionMs: clamped }).catch((err) => {
+        console.warn("[nativeSpotifyBridge.seek] failed", err);
+      });
+    } else {
+      const t = getStoredToken();
+      if (t) await seekToPosition(t, clamped);
+    }
+    if (lastPollRef.current) {
+      lastPollRef.current.positionMs = clamped;
+      lastPollRef.current.time = Date.now();
+    }
+    setEstimatedPos(clamped);
+    isSeekingRef.current = false;
+  }, []);
+
+  const readRingSeekPosition = useCallback((event, durationMs) => {
+    const svg = event.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const dx = x - cx;
+    const dy = y - cy;
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    const normalized = (angle + 360 + 90) % 360;
+    const progress = normalized / 360;
+    return progress * Math.max(durationMs || 1, 1);
+  }, []);
+
+  const handleModalRingPointerDown = useCallback((event, durationMs) => {
+    if (!durationMs) return;
+    modalRingSeekRef.current.active = true;
+    isSeekingRef.current = true;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    setEstimatedPos(readRingSeekPosition(event, durationMs));
+  }, [readRingSeekPosition]);
+
+  const handleModalRingPointerMove = useCallback((event, durationMs) => {
+    if (!modalRingSeekRef.current.active || !durationMs) return;
+    setEstimatedPos(readRingSeekPosition(event, durationMs));
+  }, [readRingSeekPosition]);
+
+  const handleModalRingPointerUp = useCallback(async (event, durationMs) => {
+    if (!modalRingSeekRef.current.active || !durationMs) return;
+    modalRingSeekRef.current.active = false;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    await commitSeekPosition(readRingSeekPosition(event, durationMs));
+  }, [commitSeekPosition, readRingSeekPosition]);
 
   const handleVolumeChange = useCallback(async (e) => {
     const vol = Number(e.target.value);
@@ -708,6 +835,13 @@ export default function Home() {
 
   const handleSelectSnippet = useCallback((trackId, index) => {
     setSelectedSnippetIndexByTrack((prev) => ({ ...prev, [trackId]: index }));
+  }, []);
+
+  const handleToggleSnippetTrack = useCallback((trackId) => {
+    setOpenSnippetTracks((prev) => ({
+      ...prev,
+      [trackId]: !prev[trackId],
+    }));
   }, []);
 
   const resolvePlaybackPosition = useCallback((trackId, fallbackPositionMs = 0) => {
@@ -860,6 +994,44 @@ export default function Home() {
     }
     return [];
   })();
+  const browserPlaybackHelp = (() => {
+    if (webPlayerId) {
+      return {
+        title: "This browser is ready for playback",
+        body: "Snippet can play directly on this computer now.",
+      };
+    }
+    if (webPlayerError?.type === "initialization_error") {
+      return {
+        title: "This browser can’t play Spotify locally",
+        body:
+          "Spotify’s browser player could not start here, so playback falls back to your phone or another active device. Open Snippet in full Chrome or Safari on this computer, or use the Spotify desktop app on this Mac.",
+      };
+    }
+    if (webPlayerError?.type === "authentication_error") {
+      return {
+        title: "Spotify browser player couldn’t authenticate",
+        body: "Log out and back in so Snippet can create a fresh browser playback device.",
+      };
+    }
+    if (webPlayerError?.type === "account_error") {
+      return {
+        title: "Spotify Premium is required for browser playback",
+        body: "Spotify only allows Web Playback SDK streaming for Premium accounts.",
+      };
+    }
+    if (webPlayerError?.type === "playback_error") {
+      return {
+        title: "Spotify browser playback hit an error",
+        body: webPlayerError.message || "Spotify rejected browser playback on this machine.",
+      };
+    }
+    return {
+      title: "Connect a playback device",
+      body:
+        "Snippet hasn’t been able to create its browser playback device on this machine yet, so Spotify is falling back to other active devices like your phone.",
+    };
+  })();
 
   return (
     <main style={s.main}>
@@ -885,9 +1057,6 @@ export default function Home() {
 
       {!token ? (
         <div style={s.empty}>
-          {authPending ? (
-            <p style={{ ...s.muted, color: "#d7cae5" }}>Connecting Spotify…</p>
-          ) : null}
           <p style={{
             ...s.emptyTitle,
             background: GRAD,
@@ -906,11 +1075,57 @@ export default function Home() {
           {activeTab === "home" && (<>
             {!playerState && !isNativeApp && !webPlayerId && devices.length === 0 && (
               <div style={s.devicePicker}>
-                <p style={s.devicePickerHeading}>Connect a playback device</p>
+                <p style={s.devicePickerHeading}>{browserPlaybackHelp.title}</p>
                 <p style={{ ...s.muted, fontSize: "0.82rem" }}>
-                  Open Spotify somewhere or refresh devices so Snippet has a place to play.
+                  {browserPlaybackHelp.body}
                 </p>
+                {webPlayerError?.type === "initialization_error" ? (
+                  <p style={{ ...s.muted, fontSize: "0.78rem", marginTop: "0.6rem", color: "#d9c8f1" }}>
+                    Best next test: open Snippet in full Chrome or Safari on this computer and make sure protected content / DRM playback is allowed.
+                  </p>
+                ) : null}
                 <button style={{ ...s.btnGhost, marginTop: "0.9rem" }} onClick={fetchDevices}>Refresh devices</button>
+              )}
+            </div>
+            )
+          ) : (
+            <div style={s.card}>
+              <div style={s.cardGradientBar} />
+              <div style={s.cardInner}>
+              <div style={s.nowPlaying}>
+                {playerState.albumArt && (
+                  <img src={playerState.albumArt} alt="Album art" style={s.albumArt} />
+                )}
+                <div style={s.trackInfo}>
+                  <div style={s.trackNameRow}>
+                    <p style={s.trackName}>{playerState.name}</p>
+                    <button style={s.saveIconBtn} onClick={handleSaveTimestamp} title={`Save moment at ${formatMs(estimatedPos)}`}>
+                      <img src="/Snippet-S.png" alt="Save moment" width="50" height="50" style={{ display: "block", objectFit: "contain", filter: "brightness(0) invert(1)" }} />
+                    </button>
+                  </div>
+                  <p style={s.artist}>{playerState.artists}</p>
+                  <input
+                    type="range"
+                    min={0}
+                    max={playerState.durationMs}
+                    value={estimatedPos}
+                    onChange={handleSeekChange}
+                    onMouseUp={handleSeekCommit}
+                    onTouchEnd={handleSeekCommit}
+                    style={{...s.seekSlider, background: `linear-gradient(to right, transparent 0%, transparent ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a ${playerState.durationMs ? (estimatedPos / playerState.durationMs) * 100 : 0}%, #2a2a3a 100%), ${GRAD}`}}
+                  />
+                  <div style={s.times}>
+                    <span>{formatMs(estimatedPos)}</span>
+                    <button
+                      style={playerState.shuffle ? s.shuffleOn : s.shuffleOff}
+                      onClick={handleShuffle}
+                      title={playerState.shuffle ? "Shuffle on" : "Shuffle off"}
+                    >
+                      ⇄
+                    </button>
+                    <span>{formatMs(playerState.durationMs)}</span>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -923,6 +1138,120 @@ export default function Home() {
                 <div style={s.sectionHeaderRight}>
                   <span style={s.sectionMeta}>{snippetTracks.length}</span>
                   <span style={{ ...s.chevron, fontSize: "0.85rem" }}>{snippetsOpen ? "▲" : "▼"}</span>
+              </div>
+
+
+              {nowPlayingTimestamps.length > 0 ? (
+                <ul style={s.list}>
+                  {nowPlayingTimestamps.map((ts, i) => (
+                    <li key={i} style={s.listItem}>
+                      <button
+                        style={s.jumpBtn}
+                        onClick={() => jump(playerState.uri, ts.positionMs)}
+                      >
+                        <span style={s.playIcon}>▶</span>
+                        <span style={s.tsLabel}>{ts.label}</span>
+                      </button>
+                      <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                      <button
+                        style={s.deleteBtn}
+                        onClick={() => handleDelete(playerState.id, i)}
+                        title="Remove"
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p style={{ ...s.muted, marginTop: "0.5rem", fontSize: "0.82rem" }}>
+                  No saved moments for this song yet.
+                </p>
+              )}
+              </div>{/* cardInner */}
+            </div>
+          )}
+
+          {/* ── Your Snippets ── */}
+          {Object.keys(allTimestamps).length > 0 && (() => {
+            const trackLookup = {};
+            (likedTracks || []).forEach((t) => { trackLookup[t.id] = t; });
+            Object.values(playlistTracks).flat().forEach((t) => { trackLookup[t.id] = t; });
+            if (playerState) trackLookup[playerState.id] = { id: playerState.id, name: playerState.name, uri: playerState.uri, artists: playerState.artists, albumArt: playerState.albumArt, durationMs: playerState.durationMs };
+
+            const snippetTracks = Object.entries(allTimestamps).map(([trackId, tss]) => ({
+              trackId,
+              track: trackLookup[trackId] ?? null,
+              tss,
+            }));
+
+            return (
+              <div style={s.librarySection}>
+                <p style={s.libraryLabel}>Your Snippets</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {snippetTracks.map(({ trackId, track, tss }) => (
+                    <div key={trackId} style={s.snippetCard}>
+                      <div style={s.snippetCardHeader}>
+                        {track?.albumArt ? (
+                          <img src={track.albumArt} alt="" style={s.snippetArt} />
+                        ) : (
+                          <div style={s.snippetArtFallback} />
+                        )}
+                        <div style={s.snippetTrackMeta}>
+                          <span style={s.snippetTrackName}>{track?.name ?? "Unknown track"}</span>
+                          <span style={s.snippetTrackArtist}>{track?.artists ?? trackId}</span>
+                        </div>
+                        {track && (
+                          <button style={s.playTrackBtn} onClick={() => jump(track.uri, 0)} title="Play from start">
+                            <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                          </button>
+                        )}
+                      </div>
+                      <div style={s.snippetList}>
+                        {tss.map((ts, i) => {
+                          const isEditing = editingSnippet?.trackId === trackId && editingSnippet?.index === i;
+                          return (
+                            <div key={i} style={s.snippetRow}>
+                              {isEditing ? (
+                                <>
+                                  <input
+                                    style={s.snippetEditInput}
+                                    value={editLabel}
+                                    onChange={(e) => setEditLabel(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleUpdateTimestamp(trackId, i, editLabel);
+                                      if (e.key === "Escape") setEditingSnippet(null);
+                                    }}
+                                    autoFocus
+                                  />
+                                  <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                                  <button style={s.snippetSaveBtn} onClick={() => handleUpdateTimestamp(trackId, i, editLabel)}>✓</button>
+                                  <button style={s.deleteBtn} onClick={() => setEditingSnippet(null)}>✕</button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    style={s.jumpBtn}
+                                    onClick={() => track && jump(track.uri, ts.positionMs)}
+                                  >
+                                    <span style={s.playIcon}>▶</span>
+                                    <span style={s.tsLabel}>{ts.label || formatMs(ts.positionMs)}</span>
+                                  </button>
+                                  <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                                  <button
+                                    style={s.editBtn}
+                                    onClick={() => { setEditingSnippet({ trackId, index: i }); setEditLabel(ts.label || ""); }}
+                                    title="Edit label"
+                                  >✏</button>
+                                  <button style={s.deleteBtn} onClick={() => handleDelete(trackId, i)} title="Remove">✕</button>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </button>
               {snippetsOpen && (
@@ -931,6 +1260,7 @@ export default function Home() {
                 ) : (
                   <div style={s.snippetDropdown}>
                     {snippetTracks.map(({ trackId, track, tss }) => {
+                      const snippetTrackOpen = Boolean(openSnippetTracks[trackId]);
                       const selectedSnippetIndex = Math.min(
                         selectedSnippetIndexByTrack[trackId] ?? 0,
                         Math.max(0, tss.length - 1)
@@ -948,76 +1278,105 @@ export default function Home() {
                               <span style={s.snippetTrackName}>{track?.name ?? "Unknown track"}</span>
                               <span style={s.snippetTrackArtist}>{track?.artists ?? trackId}</span>
                             </div>
-                            {track && (
+                            <div style={s.snippetCardActions}>
                               <button
-                                style={s.playTrackBtn}
-                                onClick={() => playTrackWithMode(track)}
-                                title={snippetModeEnabled ? "Play selected snippet" : "Play from start"}
+                                style={s.snippetExpandBtn}
+                                onClick={() => handleToggleSnippetTrack(trackId)}
+                                title={snippetTrackOpen ? "Hide snippets" : "Show snippets"}
+                                aria-label={snippetTrackOpen ? "Hide snippets" : "Show snippets"}
                               >
-                                <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                                <svg
+                                  viewBox="0 0 24 24"
+                                  width="13"
+                                  height="13"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  style={{
+                                    transform: snippetTrackOpen ? "rotate(180deg)" : "rotate(0deg)",
+                                    transition: "transform 0.18s ease",
+                                  }}
+                                >
+                                  <path d="m6 9 6 6 6-6" />
+                                </svg>
                               </button>
-                            )}
-                          </div>
-                          <div style={s.snippetList}>
-                            {tss.map((ts, i) => {
-                              const isEditing = editingSnippet?.trackId === trackId && editingSnippet?.index === i;
-                              return (
-                                <div key={i} style={s.snippetRow}>
-                                  {isEditing ? (
-                                    <>
-                                      <input
-                                        style={s.snippetEditInput}
-                                        value={editLabel}
-                                        onChange={(e) => setEditLabel(e.target.value)}
-                                        onKeyDown={(e) => {
-                                          if (e.key === "Enter") handleUpdateTimestamp(trackId, i, editLabel);
-                                          if (e.key === "Escape") setEditingSnippet(null);
-                                        }}
-                                        autoFocus
-                                      />
-                                      <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
-                                      <button style={s.snippetSaveBtn} onClick={() => handleUpdateTimestamp(trackId, i, editLabel)}>✓</button>
-                                      <button style={s.deleteBtn} onClick={() => setEditingSnippet(null)}>✕</button>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <label
-                                        className={`snippet-option${!snippetModeEnabled ? " snippet-option-dormant" : ""}`}
-                                        style={s.snippetToggleRow}
-                                      >
-                                        <input
-                                          type="radio"
-                                          name={`snippet-track-${trackId}`}
-                                          className="snippet-radio-input"
-                                          checked={selectedSnippetIndex === i}
-                                          onChange={() => handleSelectSnippet(trackId, i)}
-                                        />
-                                        <span className="snippet-selector" />
-                                        <span className="snippet-glow" />
-                                        <span className="snippet-label">
-                                          {ts.label || `Snippet ${i + 1}`}
-                                          <span className="snippet-meta">{formatMs(ts.positionMs)}</span>
-                                        </span>
-                                        <span className="snippet-connector" />
-                                      </label>
-                                      <button
-                                        style={s.editBtn}
-                                        onClick={() => { setEditingSnippet({ trackId, index: i }); setEditLabel(ts.label || ""); }}
-                                        title="Edit label"
-                                      >✏</button>
-                                      <button style={s.deleteBtn} onClick={() => handleDelete(trackId, i)} title="Remove">✕</button>
-                                    </>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {track && selectedSnippet && (
-                            <div style={s.snippetCardFooter}>
-                              <button style={{ ...s.btnPrimary, width: "100%" }} onClick={() => jump(track, selectedSnippet.positionMs, track)}>
-                                Play selected snippet
-                              </button>
+                              {track && (
+                                <button
+                                  style={s.playTrackBtn}
+                                  onClick={() => playTrackWithMode(track)}
+                                  title={snippetModeEnabled ? "Play selected snippet" : "Play from start"}
+                                >
+                                  <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                                </button>
+                              )}
                             </div>
+                          </div>
+                          {snippetTrackOpen && (
+                            <>
+                              <div style={s.snippetList}>
+                                {tss.map((ts, i) => {
+                                  const isEditing = editingSnippet?.trackId === trackId && editingSnippet?.index === i;
+                                  return (
+                                    <div key={i} style={s.snippetRow}>
+                                      {isEditing ? (
+                                        <>
+                                          <input
+                                            style={s.snippetEditInput}
+                                            value={editLabel}
+                                            onChange={(e) => setEditLabel(e.target.value)}
+                                            onKeyDown={(e) => {
+                                              if (e.key === "Enter") handleUpdateTimestamp(trackId, i, editLabel);
+                                              if (e.key === "Escape") setEditingSnippet(null);
+                                            }}
+                                            autoFocus
+                                          />
+                                          <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                                          <button style={s.snippetSaveBtn} onClick={() => handleUpdateTimestamp(trackId, i, editLabel)}>✓</button>
+                                          <button style={s.deleteBtn} onClick={() => setEditingSnippet(null)}>✕</button>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <label
+                                            className={`snippet-option${!snippetModeEnabled ? " snippet-option-dormant" : ""}`}
+                                            style={s.snippetToggleRow}
+                                          >
+                                            <input
+                                              type="radio"
+                                              name={`snippet-track-${trackId}`}
+                                              className="snippet-radio-input"
+                                              checked={selectedSnippetIndex === i}
+                                              onChange={() => handleSelectSnippet(trackId, i)}
+                                            />
+                                            <span className="snippet-selector" />
+                                            <span className="snippet-glow" />
+                                            <span className="snippet-label">
+                                              {ts.label || `Snippet ${i + 1}`}
+                                              <span className="snippet-meta">{formatMs(ts.positionMs)}</span>
+                                            </span>
+                                            <span className="snippet-connector" />
+                                          </label>
+                                          <button
+                                            style={s.editBtn}
+                                            onClick={() => { setEditingSnippet({ trackId, index: i }); setEditLabel(ts.label || ""); }}
+                                            title="Edit label"
+                                          >✏</button>
+                                          <button style={s.deleteBtn} onClick={() => handleDelete(trackId, i)} title="Remove">✕</button>
+                                        </>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              {track && selectedSnippet && (
+                                <div style={s.snippetCardFooter}>
+                                  <button style={{ ...s.btnPrimary, width: "100%" }} onClick={() => jump(track, selectedSnippet.positionMs, track)}>
+                                    Play selected snippet
+                                  </button>
+                                </div>
+                              )}
+                            </>
                           )}
                         </div>
                       );
@@ -1260,14 +1619,55 @@ export default function Home() {
 
       {/* ── Track Detail Modal ── */}
       {selectedTrack && (() => {
-        const isCurrentTrack = playerState?.id === selectedTrack.id;
-        const tss = allTimestamps[selectedTrack.id] || [];
+        const activeModalTrack = playerState
+          ? (trackLookup[playerState.id] ?? {
+              id: playerState.id,
+              name: playerState.name,
+              uri: playerState.uri,
+              artists: playerState.artists,
+              albumArt: playerState.albumArt,
+              durationMs: playerState.durationMs,
+            })
+          : selectedTrack;
+        const isCurrentTrack = playerState?.id === activeModalTrack.id;
+        const tss = allTimestamps[activeModalTrack.id] || [];
         const selectedSnippetIndex = Math.min(
-          selectedSnippetIndexByTrack[selectedTrack.id] ?? 0,
+          selectedSnippetIndexByTrack[activeModalTrack.id] ?? 0,
           Math.max(0, tss.length - 1)
         );
         const selectedSnippet = tss[selectedSnippetIndex] ?? null;
-        const upcomingTracks = (queueTracks.length > 0 ? queueTracks : fallbackUpcomingTracks).slice(0, 6);
+        const surroundingTracks = (() => {
+          for (const tracks of Object.values(playlistTracks)) {
+            const currentIndex = tracks.findIndex((track) => track.id === activeModalTrack.id);
+            if (currentIndex >= 0) {
+              return {
+                previous: tracks[currentIndex - 1] ?? null,
+                next: tracks[currentIndex + 1] ?? null,
+              };
+            }
+          }
+          return { previous: null, next: null };
+        })();
+        const upcomingTracks = (
+          queueTracks.length > 0
+            ? queueTracks
+            : surroundingTracks.next
+              ? [surroundingTracks.next, ...fallbackUpcomingTracks.filter((track) => track.id !== surroundingTracks.next.id)]
+              : fallbackUpcomingTracks
+        ).slice(0, 6);
+        const previousTrack =
+          surroundingTracks.previous ??
+          previousPlayerTrack ??
+          (selectedTrack?.id && selectedTrack.id !== activeModalTrack.id ? selectedTrack : null);
+        const nextTrack = queueTracks[0] ?? surroundingTracks.next ?? null;
+        const modalProgressMs = isCurrentTrack
+          ? estimatedPos
+          : (selectedSnippet?.positionMs ?? 0) || activeModalTrack.durationMs || 0;
+        const modalDurationMs = activeModalTrack.durationMs || playerState?.durationMs || 1;
+        const modalProgressPercent = Math.max(
+          0,
+          Math.min(100, (modalProgressMs / Math.max(modalDurationMs, 1)) * 100)
+        );
         return (
           <div style={s.modalOverlay} onClick={() => setSelectedTrack(null)}>
             <div style={s.modalSheet} onClick={e => e.stopPropagation()}>
@@ -1292,8 +1692,8 @@ export default function Home() {
                 <div style={s.modalHero}>
                   <div style={s.modalMetaRow}>
                     <div>
-                      <p style={s.modalTrackName}>{selectedTrack.name}</p>
-                      <p style={s.modalArtist}>{selectedTrack.artists}</p>
+                      <p style={s.modalTrackName}>{activeModalTrack.name}</p>
+                      <p style={s.modalArtist}>{activeModalTrack.artists}</p>
                     </div>
                     <button style={s.modalFavorite} aria-label="Favorite track">
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -1304,31 +1704,72 @@ export default function Home() {
 
                   <div style={s.modalDiscStage}>
                     <div style={{ ...s.modalSideArt, ...s.modalSideArtLeft }}>
-                      {selectedTrack.albumArt ? (
-                        <img src={selectedTrack.albumArt} alt="" style={s.modalSideArtImage} />
+                      {previousTrack?.albumArt ? (
+                        <>
+                          <img src={previousTrack.albumArt} alt="" style={s.modalSideArtImage} />
+                          <div style={{ ...s.modalSideArtGlass, ...s.modalSideArtGlassLeft }} />
+                        </>
                       ) : (
                         <div style={s.modalSideArtFallback} />
                       )}
                     </div>
                     <div style={{ ...s.modalSideArt, ...s.modalSideArtRight }}>
-                      {selectedTrack.albumArt ? (
-                        <img src={selectedTrack.albumArt} alt="" style={s.modalSideArtImage} />
+                      {nextTrack?.albumArt ? (
+                        <>
+                          <img src={nextTrack.albumArt} alt="" style={s.modalSideArtImage} />
+                          <div style={{ ...s.modalSideArtGlass, ...s.modalSideArtGlassRight }} />
+                        </>
                       ) : (
                         <div style={s.modalSideArtFallback} />
                       )}
                     </div>
                     <div style={s.modalDiscOuter}>
+                      {isCurrentTrack && (
+                        <div
+                          style={s.modalProgressHitArea}
+                          onPointerDown={(event) => handleModalRingPointerDown(event, activeModalTrack.durationMs)}
+                          onPointerMove={(event) => handleModalRingPointerMove(event, activeModalTrack.durationMs)}
+                          onPointerUp={(event) => handleModalRingPointerUp(event, activeModalTrack.durationMs)}
+                          onPointerCancel={(event) => handleModalRingPointerUp(event, activeModalTrack.durationMs)}
+                        />
+                      )}
+                      <svg
+                        viewBox="0 0 100 100"
+                        style={s.modalProgressRing}
+                        aria-hidden="true"
+                      >
+                        <circle
+                          cx="50"
+                          cy="50"
+                          r="45"
+                          fill="none"
+                          stroke="rgba(255,255,255,0.14)"
+                          strokeWidth="1.8"
+                        />
+                        <circle
+                          cx="50"
+                          cy="50"
+                          r="45"
+                          fill="none"
+                          stroke="rgba(146, 196, 255, 0.98)"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          pathLength="100"
+                          strokeDasharray={`${modalProgressPercent} 100`}
+                          transform="rotate(-90 50 50)"
+                        />
+                      </svg>
                       <div style={s.modalDiscInner}>
                         <div style={s.modalDiscCenter}>
-                          {selectedTrack.albumArt ? (
-                            <img src={selectedTrack.albumArt} alt="" style={s.modalArt} />
+                          {activeModalTrack.albumArt ? (
+                            <img src={activeModalTrack.albumArt} alt="" style={s.modalArt} />
                           ) : (
                             <div style={s.modalArtFallback} />
                           )}
                         </div>
                       </div>
                       <div style={s.modalDiscTime}>
-                        {formatMs(isCurrentTrack ? estimatedPos : (selectedSnippet?.positionMs ?? 0) || selectedTrack.durationMs || 0)}
+                        {formatMs(modalProgressMs)}
                       </div>
                     </div>
                   </div>
@@ -1343,10 +1784,13 @@ export default function Home() {
                       aria-label="Shuffle"
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m18 14 4 4-4 4" />
-                        <path d="m18 2 4 4-4 4" />
-                        <path d="M2 18h5l9-9" />
-                        <path d="M2 6h5l9 9" />
+                        <path d="M4 7h2.5l9 10H20" />
+                        <path d="M20 17l-2.8 2.8" />
+                        <path d="M20 17l-2.8-2.8" />
+                        <path d="M4 17h2.5l3.3-3.7" />
+                        <path d="M20 7h-4.5l-2.2 2.4" />
+                        <path d="M20 7l-2.8 2.8" />
+                        <path d="M20 7l-2.8-2.8" />
                       </svg>
                     </button>
                     <button
@@ -1366,7 +1810,7 @@ export default function Home() {
                           handlePlayPause();
                           return;
                         }
-                        jump(selectedTrack, resolvePlaybackPosition(selectedTrack.id, 0), selectedTrack);
+                        jump(activeModalTrack, resolvePlaybackPosition(activeModalTrack.id, 0), activeModalTrack);
                       }}
                       aria-label={isCurrentTrack && playerState?.isPlaying ? "Pause" : "Play"}
                     >
@@ -1384,7 +1828,7 @@ export default function Home() {
                       aria-label="Next track"
                     >
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M16 5h2v14h-2zM6 5l9.5 7L6 19z" transform="translate(24 0) scale(-1 1)" />
+                        <path d="M16 5h2v14h-2zM6 5l9.5 7L6 19z" />
                       </svg>
                     </button>
                     <button
@@ -1396,10 +1840,10 @@ export default function Home() {
                       aria-label={`Repeat mode ${playerState?.repeatMode ?? "off"}`}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M17 1.8v4.5h4.5" />
-                        <path d="M3.2 7.7h12.4a4.1 4.1 0 0 1 3.1 1.3L21.5 12" />
-                        <path d="M7 22.2v-4.5H2.5" />
-                        <path d="M20.8 16.3H8.4a4.1 4.1 0 0 1-3.1-1.3L2.5 12" />
+                        <path d="M17 3v4h4" />
+                        <path d="M20.5 7H9a5 5 0 0 0-5 5" />
+                        <path d="M7 21v-4H3" />
+                        <path d="M3.5 17H15a5 5 0 0 0 5-5" />
                       </svg>
                       {playerState?.repeatMode === "track" && <span style={s.repeatBadge}>1</span>}
                     </button>
@@ -1457,10 +1901,10 @@ export default function Home() {
                         >
                           <input
                             type="radio"
-                            name={`modal-snippet-${selectedTrack.id}`}
+                            name={`modal-snippet-${activeModalTrack.id}`}
                             className="snippet-radio-input"
                             checked={selectedSnippetIndex === i}
-                            onChange={() => handleSelectSnippet(selectedTrack.id, i)}
+                            onChange={() => handleSelectSnippet(activeModalTrack.id, i)}
                           />
                           <span className="snippet-selector" />
                           <span className="snippet-glow" />
@@ -1477,7 +1921,7 @@ export default function Home() {
                         style={{ ...s.btnPrimary, width: "100%", marginTop: "1rem" }}
                         onClick={() => {
                           if (!selectedSnippet) return;
-                          jump(selectedTrack, selectedSnippet.positionMs, selectedTrack);
+                          jump(activeModalTrack, selectedSnippet.positionMs, activeModalTrack);
                           setSelectedTrack(null);
                         }}
                       >
@@ -1548,6 +1992,16 @@ export default function Home() {
                       <path d="M8 5v14l11-7z" />
                     </svg>
                   )}
+                </button>
+                <button
+                  style={s.miniSecondaryControl}
+                  onClick={handleSkipNext}
+                  aria-label="Next track"
+                  title="Next track"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M16 5h2v14h-2zM6 5l9.5 7L6 19z" />
+                  </svg>
                 </button>
               </div>
             </div>
@@ -1758,10 +2212,20 @@ const s = {
     boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
   },
   trackInfo: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center" },
+  trackNameRow: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    gap: "0.5rem", marginBottom: "0.2rem",
+  },
   trackName: {
-    margin: "0 0 0.2rem", fontWeight: 700, fontSize: "1rem",
+    margin: 0, fontWeight: 700, fontSize: "1rem",
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-    letterSpacing: "-0.01em",
+    letterSpacing: "-0.01em", flex: 1, minWidth: 0,
+  },
+  saveIconBtn: {
+    background: "#7b31c7", border: "none", borderRadius: 8,
+    width: 30, height: 30, display: "flex", alignItems: "center",
+    justifyContent: "center", cursor: "pointer",
+    flexShrink: 0, transition: "transform 0.15s, opacity 0.15s",
   },
   artist: { margin: "0 0 0.3rem", color: "#8888aa", fontSize: "0.82rem" },
   deviceBadge: {
@@ -2224,6 +2688,27 @@ const s = {
   snippetTrackMeta: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 },
   snippetTrackName: { fontSize: "0.88rem", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#f0f0f5" },
   snippetTrackArtist: { fontSize: "0.73rem", color: "#5a5a78" },
+  snippetCardActions: {
+    marginLeft: "auto",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.45rem",
+    flexShrink: 0,
+  },
+  snippetExpandBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: "50%",
+    border: "1px solid rgba(224,170,255,0.12)",
+    background: "rgba(255,255,255,0.03)",
+    color: "#d6c4e8",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+  },
   snippetList: { display: "flex", flexDirection: "column" },
   snippetRow: {
     display: "flex",
@@ -2614,6 +3099,7 @@ const s = {
     justifyContent: "center",
     minHeight: 350,
     marginBottom: "2rem",
+    overflow: "hidden",
   },
   modalSideArt: {
     position: "absolute",
@@ -2623,21 +3109,45 @@ const s = {
     borderRadius: "50%",
     overflow: "hidden",
     transform: "translateY(-50%)",
-    opacity: 0.66,
-    filter: "blur(0.2px)",
+    opacity: 0.82,
+    filter: "blur(0.15px) saturate(0.95)",
     border: "1px solid rgba(255,255,255,0.12)",
     boxShadow: "0 24px 40px rgba(0,0,0,0.3)",
+    zIndex: 1,
   },
   modalSideArtLeft: {
-    left: "-0.8rem",
+    left: "0.4rem",
+    maskImage: "linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.94) 58%, rgba(0,0,0,0.42) 78%, transparent 100%)",
+    WebkitMaskImage: "linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.94) 58%, rgba(0,0,0,0.42) 78%, transparent 100%)",
   },
   modalSideArtRight: {
-    right: "-0.8rem",
+    right: "0.4rem",
+    maskImage: "linear-gradient(270deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.94) 58%, rgba(0,0,0,0.42) 78%, transparent 100%)",
+    WebkitMaskImage: "linear-gradient(270deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.94) 58%, rgba(0,0,0,0.42) 78%, transparent 100%)",
   },
   modalSideArtImage: {
     width: "100%",
     height: "100%",
     objectFit: "cover",
+  },
+  modalSideArtGlass: {
+    position: "absolute",
+    inset: 0,
+    borderRadius: "50%",
+    pointerEvents: "none",
+    backdropFilter: "blur(14px) saturate(1.15)",
+    WebkitBackdropFilter: "blur(14px) saturate(1.15)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -18px 26px rgba(255,255,255,0.03)",
+  },
+  modalSideArtGlassLeft: {
+    background: "linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.02) 46%, rgba(16,11,22,0.18) 60%, rgba(16,11,22,0.48) 74%, rgba(16,11,22,0.78) 100%)",
+    maskImage: "linear-gradient(90deg, transparent 0%, transparent 48%, rgba(0,0,0,0.55) 62%, rgba(0,0,0,0.9) 78%, rgba(0,0,0,1) 100%)",
+    WebkitMaskImage: "linear-gradient(90deg, transparent 0%, transparent 48%, rgba(0,0,0,0.55) 62%, rgba(0,0,0,0.9) 78%, rgba(0,0,0,1) 100%)",
+  },
+  modalSideArtGlassRight: {
+    background: "linear-gradient(270deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.02) 46%, rgba(16,11,22,0.18) 60%, rgba(16,11,22,0.48) 74%, rgba(16,11,22,0.78) 100%)",
+    maskImage: "linear-gradient(270deg, transparent 0%, transparent 48%, rgba(0,0,0,0.55) 62%, rgba(0,0,0,0.9) 78%, rgba(0,0,0,1) 100%)",
+    WebkitMaskImage: "linear-gradient(270deg, transparent 0%, transparent 48%, rgba(0,0,0,0.55) 62%, rgba(0,0,0,0.9) 78%, rgba(0,0,0,1) 100%)",
   },
   modalSideArtFallback: {
     width: "100%",
@@ -2652,17 +3162,38 @@ const s = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "radial-gradient(circle at 35% 26%, rgba(255,255,255,0.28), rgba(255,255,255,0.06) 24%, rgba(30,22,40,0.32) 58%, rgba(11,8,16,0.7) 100%)",
-    border: "1px solid rgba(255,255,255,0.2)",
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.38), inset 0 -24px 40px rgba(0,0,0,0.42), 0 34px 62px rgba(0,0,0,0.42)",
+    padding: "12px",
+    border: "1px solid rgba(255,255,255,0.18)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -20px 36px rgba(0,0,0,0.34), 0 34px 62px rgba(0,0,0,0.42)",
+    zIndex: 2,
+  },
+  modalProgressRing: {
+    position: "absolute",
+    inset: "3.5%",
+    width: "93%",
+    height: "93%",
+    pointerEvents: "none",
+    filter: "drop-shadow(0 0 8px rgba(120, 180, 255, 0.18))",
+  },
+  modalProgressHitArea: {
+    position: "absolute",
+    inset: "3.5%",
+    width: "93%",
+    height: "93%",
+    borderRadius: "50%",
+    background: "transparent",
+    cursor: "grab",
+    touchAction: "none",
+    zIndex: 3,
   },
   modalDiscInner: {
-    width: "82%",
-    height: "82%",
+    width: "100%",
+    height: "100%",
     borderRadius: "50%",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+    background: "radial-gradient(circle at 35% 26%, rgba(255,255,255,0.24), rgba(255,255,255,0.06) 24%, rgba(30,22,40,0.34) 58%, rgba(11,8,16,0.74) 100%)",
     border: "1px solid rgba(211, 195, 255, 0.24)",
     boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.04)",
   },
@@ -2689,6 +3220,26 @@ const s = {
     color: "#fffafc",
     letterSpacing: "0.02em",
   },
+  modalSeekWrap: {
+    marginTop: "-0.25rem",
+    marginBottom: "1.2rem",
+    padding: "0 0.4rem",
+  },
+  modalSeekSlider: {
+    width: "100%",
+    display: "block",
+    cursor: "pointer",
+    accentColor: "#7ebcff",
+  },
+  modalSeekTimes: {
+    marginTop: "0.35rem",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    fontSize: "0.72rem",
+    color: "rgba(255,255,255,0.56)",
+    letterSpacing: "0.02em",
+  },
   modalTrackName: {
     margin: "0 0 0.35rem", fontSize: "3rem", fontWeight: 300,
     letterSpacing: "-0.03em",
@@ -2712,8 +3263,10 @@ const s = {
     width: 42,
     height: 42,
     borderRadius: "50%",
-    border: "none",
-    background: "transparent",
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.025) 100%)",
+    backdropFilter: "blur(18px) saturate(1.08)",
+    WebkitBackdropFilter: "blur(18px) saturate(1.08)",
     color: "rgba(255,255,255,0.94)",
     cursor: "pointer",
     display: "flex",
@@ -2721,6 +3274,7 @@ const s = {
     justifyContent: "center",
     flexShrink: 0,
     position: "relative",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 10px 28px rgba(0,0,0,0.2)",
   },
   modalTransportBtnActive: {
     color: "#E0AAFF",
@@ -2730,14 +3284,16 @@ const s = {
     width: 84,
     height: 84,
     borderRadius: "50%",
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.12)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(31,24,42,0.72) 26%, rgba(16,12,23,0.9) 100%)",
+    border: "1px solid rgba(255,255,255,0.16)",
+    backdropFilter: "blur(22px) saturate(1.08)",
+    WebkitBackdropFilter: "blur(22px) saturate(1.08)",
     color: "#fff",
     cursor: "pointer",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.16), 0 24px 40px rgba(0,0,0,0.36)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -18px 28px rgba(0,0,0,0.16), 0 24px 40px rgba(0,0,0,0.36)",
   },
   repeatBadge: {
     position: "absolute",

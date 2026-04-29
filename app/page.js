@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { startTransition, useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   playSnippet,
   getPlayerState,
@@ -132,6 +132,7 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [urlError, setUrlError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [activeTab, setActiveTab] = useState("home");
   const [pressedTab, setPressedTab] = useState(null);
 
@@ -184,6 +185,11 @@ export default function Home() {
   const [snippetsOpen, setSnippetsOpen] = useState(true);
   const [playlistsOpen, setPlaylistsOpen] = useState(false);
   const [recentlyPlayedOpen, setRecentlyPlayedOpen] = useState(false);
+  const [modalClipPressed, setModalClipPressed] = useState(false);
+  const [modalClipSaved, setModalClipSaved] = useState(false);
+  const [modalClipNotice, setModalClipNotice] = useState("");
+  const [modalMenuOpen, setModalMenuOpen] = useState(false);
+  const [modalMenuSnippetsOpen, setModalMenuSnippetsOpen] = useState(false);
 
   // Spotify global search
   const [spotifyResults, setSpotifyResults] = useState([]);
@@ -385,7 +391,10 @@ export default function Home() {
   useEffect(() => {
     if (!token) return;
     const poll = async () => {
-      const state = await getPlayerState(token);
+      const state = await withFreshToken((accessToken) => getPlayerState(accessToken)).catch((err) => {
+        console.warn("[playerPoll] failed", err);
+        return null;
+      });
       if (state) {
         setPlayerState(state);
         if (!isSeekingRef.current) {
@@ -404,7 +413,7 @@ export default function Home() {
     poll();
     const id = setInterval(poll, 3000);
     return () => clearInterval(id);
-  }, [token]);
+  }, [token, withFreshToken]);
 
   // Fetch available devices whenever playerState is null (nothing active)
   const fetchDevices = useCallback(async () => {
@@ -412,12 +421,17 @@ export default function Home() {
     const t = getStoredToken();
     if (!t) return;
     setLoadingDevices(true);
-    const list = await getDevices(t);
-    setDevices(list);
-    setLoadingDevices(false);
-    // Auto-select if only one device available
-    if (list.length === 1 && !deviceId) setDeviceId(list[0].id);
-  }, [deviceId, isNativeApp]);
+    try {
+      const list = await withFreshToken((accessToken) => getDevices(accessToken)).catch((err) => {
+        console.warn("[devices] failed to load", err);
+        return [];
+      });
+      setDevices(list || []);
+      if ((list || []).length === 1 && !deviceId) setDeviceId(list[0].id);
+    } finally {
+      setLoadingDevices(false);
+    }
+  }, [deviceId, isNativeApp, withFreshToken]);
 
   // Initial fetch + auto-poll every 5s while nothing is playing
   useEffect(() => {
@@ -480,7 +494,9 @@ export default function Home() {
     if (!token || playlists.length > 0) return;
     withFreshToken((accessToken) => getUserPlaylists(accessToken))
       .then((items) => {
-        if (items) setPlaylists(items);
+        if (items) {
+          startTransition(() => setPlaylists(items));
+        }
       })
       .catch((err) => console.warn("[playlists] failed to load", err));
   }, [token, playlists.length, withFreshToken]);
@@ -489,7 +505,9 @@ export default function Home() {
     if (!token || likedTracks !== null) return;
     withFreshToken((accessToken) => getLikedTracks(accessToken))
       .then((tracks) => {
-        if (tracks) setLikedTracks(tracks);
+        if (tracks) {
+          startTransition(() => setLikedTracks(tracks));
+        }
       })
       .catch((err) => console.warn("[likedTracks] failed to load", err));
   }, [token, likedTracks, withFreshToken]);
@@ -501,14 +519,16 @@ export default function Home() {
     }
     withFreshToken((accessToken) => getRecentlyPlayed(accessToken))
       .then((tracks) => {
-        if (tracks) setRecentlyPlayedTracks(tracks);
+        if (tracks) {
+          startTransition(() => setRecentlyPlayedTracks(tracks));
+        }
       })
       .catch((err) => console.warn("[recentlyPlayed] failed to load", err));
   }, [token, withFreshToken]);
 
   // Spotify global search — fires when on Search tab, debounced 350ms
   useEffect(() => {
-    if (activeTab !== "search" || !searchQuery) {
+    if (activeTab !== "search" || !deferredSearchQuery) {
       setSpotifyResults([]);
       setSearchLoading(false);
       return;
@@ -518,14 +538,14 @@ export default function Home() {
       try {
         let t = getStoredToken();
         if (!t) { setSearchLoading(false); return; }
-        let results = await searchTracks(t, searchQuery);
-        setSpotifyResults(results);
+        let results = await searchTracks(t, deferredSearchQuery);
+        startTransition(() => setSpotifyResults(results));
       } catch (err) {
         if (err.message === "TOKEN_EXPIRED") {
           const newToken = await doRefresh();
           if (newToken) {
-            const results = await searchTracks(newToken, searchQuery).catch(() => []);
-            setSpotifyResults(results);
+            const results = await searchTracks(newToken, deferredSearchQuery).catch(() => []);
+            startTransition(() => setSpotifyResults(results));
           }
         }
       } finally {
@@ -533,16 +553,18 @@ export default function Home() {
       }
     }, 350);
     return () => clearTimeout(id);
-  }, [searchQuery, activeTab, doRefresh]);
+  }, [deferredSearchQuery, activeTab, doRefresh]);
 
   // When searching, eagerly load liked tracks and all playlist tracks
   useEffect(() => {
     if (!searchQuery) return;
     if (likedTracks === null) {
-      withFreshToken((accessToken) => getLikedTracks(accessToken))
-        .then((tracks) => {
-          if (tracks) setLikedTracks(tracks);
-        })
+        withFreshToken((accessToken) => getLikedTracks(accessToken))
+          .then((tracks) => {
+            if (tracks) {
+              startTransition(() => setLikedTracks(tracks));
+            }
+          })
         .catch((err) => console.warn("[likedTracks] failed to load", err));
     }
     playlists.forEach((pl) => {
@@ -550,7 +572,9 @@ export default function Home() {
         withFreshToken((accessToken) => getPlaylistTracks(accessToken, pl.id))
           .then((result) => {
             if (!result) return;
-            setPlaylistTracks((prev) => ({ ...prev, [pl.id]: result.tracks }));
+            startTransition(() => {
+              setPlaylistTracks((prev) => ({ ...prev, [pl.id]: result.tracks }));
+            });
             if (result.forbidden) {
               setPlaylistErrors((prev) => ({
                 ...prev,
@@ -566,7 +590,10 @@ export default function Home() {
   const handleToggleLiked = useCallback(async () => {
     setLikedOpen((o) => !o);
     if (likedTracks !== null) return; // already loaded
-    const tracks = await withFreshToken((accessToken) => getLikedTracks(accessToken));
+    const tracks = await withFreshToken((accessToken) => getLikedTracks(accessToken)).catch((err) => {
+      console.warn("[likedTracks] failed to toggle-load", err);
+      return null;
+    });
     if (tracks) setLikedTracks(tracks);
   }, [likedTracks, withFreshToken]);
 
@@ -579,18 +606,23 @@ export default function Home() {
       setOpenPlaylistId(playlistId);
       if (playlistTracks[playlistId]) return; // already cached
       setLoadingPlaylistId(playlistId);
-      const result = await withFreshToken((accessToken) => getPlaylistTracks(accessToken, playlistId))
-        .catch((err) => {
-          console.warn("[playlistTracks] failed to load", playlistId, err);
-          return null;
-        });
-      if (result) {
-        setPlaylistTracks((prev) => ({ ...prev, [playlistId]: result.tracks }));
-        if (result.forbidden) {
-          setPlaylistErrors((prev) => ({ ...prev, [playlistId]: "This playlist can't be accessed. It may be private or managed by Spotify." }));
+      try {
+        const result = await withFreshToken((accessToken) => getPlaylistTracks(accessToken, playlistId))
+          .catch((err) => {
+            console.warn("[playlistTracks] failed to load", playlistId, err);
+            return null;
+          });
+        if (result) {
+          startTransition(() => {
+            setPlaylistTracks((prev) => ({ ...prev, [playlistId]: result.tracks }));
+          });
+          if (result.forbidden) {
+            setPlaylistErrors((prev) => ({ ...prev, [playlistId]: "This playlist can't be accessed. It may be private or managed by Spotify." }));
+          }
         }
+      } finally {
+        setLoadingPlaylistId(null);
       }
-      setLoadingPlaylistId(null);
     },
     [openPlaylistId, playlistTracks, withFreshToken]
   );
@@ -614,7 +646,10 @@ export default function Home() {
 
     const t = getStoredToken();
     if (!t) return null;
-    const list = await getDevices(t).catch(() => []);
+    const list = await withFreshToken((accessToken) => getDevices(accessToken)).catch((err) => {
+      console.warn("[ensureBrowserPlaybackDevice] failed", err);
+      return [];
+    });
     const snippetDevice =
       list.find((device) => device.name === "Snippet") ??
       list.find((device) => device.id === webPlayerIdRef.current) ??
@@ -625,7 +660,7 @@ export default function Home() {
     }
 
     return null;
-  }, [isNativeApp]);
+  }, [isNativeApp, withFreshToken]);
 
   const jump = useCallback(async (trackOrUri, positionMs, playbackContext = null) => {
     const trackUri = typeof trackOrUri === "string" ? trackOrUri : trackOrUri?.uri;
@@ -866,6 +901,67 @@ export default function Home() {
 
   const playbackTargetDevice = webPlayerId || deviceId || null;
 
+  const transitionIntoSnippetIfNeeded = useCallback(async ({ previousTrackId = null, startPlayback }) => {
+    const restoreVolumePercent =
+      snippetModeEnabled && Number.isFinite(playerState?.volumePercent)
+        ? playerState.volumePercent
+        : null;
+    const shouldMuteTransition = restoreVolumePercent != null;
+
+    if (shouldMuteTransition) {
+      await withFreshToken((accessToken) => setVolume(accessToken, 0)).catch(() => null);
+    }
+
+    try {
+      await startPlayback();
+
+      let nextState = null;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const snapshot = await refreshPlayerSnapshot();
+        nextState = snapshot?.state ?? null;
+        if (nextState?.id && (!previousTrackId || nextState.id !== previousTrackId)) break;
+        await new Promise((resolve) => setTimeout(resolve, 180));
+      }
+
+      if (!nextState?.id || !snippetModeEnabled) return;
+
+      const snippets = allTimestamps[nextState.id] || [];
+      const selectedIndex = Math.min(
+        selectedSnippetIndexByTrack[nextState.id] ?? 0,
+        Math.max(0, snippets.length - 1)
+      );
+      const snippetPositionMs = snippets[selectedIndex]?.positionMs ?? 0;
+      if (snippetPositionMs <= 0) return;
+
+      await withFreshToken((accessToken) => seekToPosition(accessToken, snippetPositionMs)).catch(() => null);
+
+      setPlayerState((prev) => (
+        prev && prev.id === nextState.id
+          ? { ...prev, positionMs: snippetPositionMs }
+          : prev
+      ));
+      lastPollRef.current = {
+        time: Date.now(),
+        positionMs: snippetPositionMs,
+        isPlaying: true,
+      };
+      setEstimatedPos(snippetPositionMs);
+    } finally {
+      if (shouldMuteTransition) {
+        await withFreshToken((accessToken) => setVolume(accessToken, restoreVolumePercent)).catch(() => null);
+        setPlayerState((prev) => (prev ? { ...prev, volumePercent: restoreVolumePercent } : prev));
+      }
+      setTimeout(() => refreshPlayerSnapshot(), 250);
+    }
+  }, [
+    allTimestamps,
+    playerState?.volumePercent,
+    refreshPlayerSnapshot,
+    selectedSnippetIndexByTrack,
+    snippetModeEnabled,
+    withFreshToken,
+  ]);
+
   const handleRepeatCycle = useCallback(async () => {
     const t = getStoredToken();
     if (!t || !playerState) return;
@@ -883,31 +979,11 @@ export default function Home() {
   const handleSkipNext = useCallback(async () => {
     const t = getStoredToken();
     if (!t) return;
-    const previousTrackId = playerState?.id ?? null;
-    await skipToNext(t, playbackTargetDevice);
-    const applyPostSkipBehavior = async () => {
-      let nextState = null;
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        const snapshot = await refreshPlayerSnapshot();
-        nextState = snapshot?.state ?? null;
-        if (nextState?.id && nextState.id !== previousTrackId) break;
-        await new Promise((resolve) => setTimeout(resolve, 220));
-      }
-      if (!nextState?.id || !snippetModeEnabled) return;
-      const snippets = allTimestamps[nextState.id] || [];
-      const selectedIndex = Math.min(
-        selectedSnippetIndexByTrack[nextState.id] ?? 0,
-        Math.max(0, snippets.length - 1)
-      );
-      const snippetPositionMs = snippets[selectedIndex]?.positionMs ?? 0;
-      if (snippetPositionMs <= 0) return;
-      const nextTrack = trackFromPlayerSnapshot(nextState);
-      if (!nextTrack) return;
-      await jump(nextTrack, snippetPositionMs, nextTrack);
-      setTimeout(() => refreshPlayerSnapshot(), 250);
-    };
-    void applyPostSkipBehavior();
-  }, [allTimestamps, jump, playbackTargetDevice, playerState?.id, refreshPlayerSnapshot, selectedSnippetIndexByTrack, snippetModeEnabled]);
+    await transitionIntoSnippetIfNeeded({
+      previousTrackId: playerState?.id ?? null,
+      startPlayback: () => skipToNext(t, playbackTargetDevice),
+    });
+  }, [playbackTargetDevice, playerState?.id, transitionIntoSnippetIfNeeded]);
 
   const handleSkipPrevious = useCallback(async () => {
     const t = getStoredToken();
@@ -936,60 +1012,41 @@ export default function Home() {
       }
     }
 
-    await setShuffle(t, true);
-    setPlayerState((prev) => prev ? { ...prev, shuffle: true } : prev);
+    await transitionIntoSnippetIfNeeded({
+      previousTrackId: playerState?.id ?? null,
+      startPlayback: async () => {
+        await setShuffle(t, true);
+        setPlayerState((prev) => prev ? { ...prev, shuffle: true } : prev);
 
-    const request = {
-      trackUri: `${playlist.uri}:seed`,
-      positionMs: 0,
-      deviceId: targetDevice,
-      contextUri: playlist.uri ?? `spotify:playlist:${playlist.id}`,
-    };
+        const request = {
+          trackUri: `${playlist.uri}:seed`,
+          positionMs: 0,
+          deviceId: targetDevice,
+          contextUri: playlist.uri ?? `spotify:playlist:${playlist.id}`,
+        };
 
-    const res = await playSnippet(t, request);
-    if (res.status === 401) {
-      const newToken = await doRefresh();
-      if (!newToken) return;
-      if (browserDeviceId || webPlayerIdRef.current) {
-        try {
-          await transferPlayback(newToken, browserDeviceId || webPlayerIdRef.current, false);
-        } catch (err) {
-          console.warn("[transferPlayback retry] failed", err);
+        const res = await playSnippet(t, request);
+        if (res.status === 401) {
+          const newToken = await doRefresh();
+          if (!newToken) return;
+          if (browserDeviceId || webPlayerIdRef.current) {
+            try {
+              await transferPlayback(newToken, browserDeviceId || webPlayerIdRef.current, false);
+            } catch (err) {
+              console.warn("[transferPlayback retry] failed", err);
+            }
+          }
+          await setShuffle(newToken, true);
+          await playSnippet(newToken, { ...request });
         }
-      }
-      await setShuffle(newToken, true);
-      await playSnippet(newToken, { ...request });
-    }
-
-    const applySnippetIfNeeded = async () => {
-      let nextState = null;
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        const snapshot = await refreshPlayerSnapshot();
-        nextState = snapshot?.state ?? null;
-        if (nextState?.id) break;
-        await new Promise((resolve) => setTimeout(resolve, 220));
-      }
-      if (!nextState?.id || !snippetModeEnabled) return;
-      const snippets = allTimestamps[nextState.id] || [];
-      const selectedIndex = Math.min(
-        selectedSnippetIndexByTrack[nextState.id] ?? 0,
-        Math.max(0, snippets.length - 1)
-      );
-      const snippetPositionMs = snippets[selectedIndex]?.positionMs ?? 0;
-      if (snippetPositionMs <= 0) return;
-      const nextTrack = trackFromPlayerSnapshot(nextState);
-      if (!nextTrack) return;
-      await jump(nextTrack, snippetPositionMs, nextTrack);
-      setTimeout(() => refreshPlayerSnapshot(), 250);
-    };
-
-    void applySnippetIfNeeded();
-  }, [allTimestamps, deviceId, doRefresh, ensureBrowserPlaybackDevice, jump, refreshPlayerSnapshot, selectedSnippetIndexByTrack, snippetModeEnabled]);
+      },
+    });
+  }, [deviceId, doRefresh, ensureBrowserPlaybackDevice, playerState?.id, transitionIntoSnippetIfNeeded]);
 
   const handleSaveTimestamp = useCallback(async () => {
-    if (!playerState) return;
+    if (!playerState) return false;
     const t = getStoredToken();
-    if (!t) return;
+    if (!t) return false;
     const label = labelInput.trim() || null;
     try {
       const updated = await saveTimestamp(t, playerState.id, Math.floor(estimatedPos), label);
@@ -1001,14 +1058,31 @@ export default function Home() {
         }));
       }
       setLabelInput("");
+      return true;
     } catch (err) {
       if (err.message === "MAX_SNIPPETS_REACHED") {
         alert(err.detail || `You can save up to ${MAX_SNIPPETS_PER_TRACK} snippets per song.`);
-        return;
+        return false;
       }
       console.warn("[saveTimestamp] failed", err);
+      return false;
     }
   }, [playerState, estimatedPos, labelInput]);
+
+  const handleModalClip = useCallback(async () => {
+    const saved = await handleSaveTimestamp();
+    if (!saved) {
+      setModalClipNotice("Clip couldn't be saved");
+      window.setTimeout(() => setModalClipNotice(""), 1200);
+      return;
+    }
+    setModalClipSaved(true);
+    setModalClipNotice(`Clip saved at ${formatMs(estimatedPos)}`);
+    window.setTimeout(() => {
+      setModalClipSaved(false);
+      setModalClipNotice("");
+    }, 1100);
+  }, [estimatedPos, handleSaveTimestamp]);
 
   const handleSelectSnippet = useCallback((trackId, index) => {
     setSelectedSnippetIndexByTrack((prev) => ({ ...prev, [trackId]: index }));
@@ -1111,66 +1185,68 @@ export default function Home() {
     setTimeout(() => setPressedTab(null), 150);
   }, []);
 
-  // ── Render ───────────────────────────────────────────────────────────────────
-
-  if (!hydrated) {
-    return (
-      <main style={{ ...s.main, ...s.centeredLoaderScreen }}>
-        <ThemedLoader size={0.78} label="Loading Snippet" />
-      </main>
-    );
-  }
-
-  const nowPlayingTimestamps = playerState
-    ? (allTimestamps[playerState.id] || [])
-    : [];
+  const nowPlayingTimestamps = useMemo(
+    () => (playerState ? (allTimestamps[playerState.id] || []) : []),
+    [allTimestamps, playerState]
+  );
   const selectedNowPlayingSnippetIndex = playerState
     ? Math.min(selectedSnippetIndexByTrack[playerState.id] ?? 0, Math.max(0, nowPlayingTimestamps.length - 1))
     : 0;
   const selectedNowPlayingSnippet = nowPlayingTimestamps[selectedNowPlayingSnippetIndex] ?? null;
-  const trackLookup = {};
-  (likedTracks || []).forEach((t) => { trackLookup[t.id] = t; });
-  Object.values(playlistTracks).flat().forEach((t) => { trackLookup[t.id] = t; });
-  if (playerState) {
-    trackLookup[playerState.id] = {
-      id: playerState.id,
-      name: playerState.name,
-      uri: playerState.uri,
-      artists: playerState.artists,
-      albumArt: playerState.albumArt,
-      durationMs: playerState.durationMs,
-    };
-  }
-  const snippetTracks = Object.entries(allTimestamps)
-    .map(([trackId, tss]) => ({
-      trackId,
-      track: trackLookup[trackId] ?? null,
-      tss,
-      latestCreatedAt: Math.max(
-        ...tss.map((ts) => {
-          const created = ts.createdAt ? Date.parse(ts.createdAt) : 0;
-          return Number.isNaN(created) ? 0 : created;
-        })
-      ),
-    }))
-    .sort((a, b) => b.latestCreatedAt - a.latestCreatedAt);
-  const recentPlaylists = [...playlists]
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  const prioritizedPlaylists = recentPlaylists.slice(0, 6);
-  const remainingPlaylists = recentPlaylists.slice(6);
-  const prioritizedRecentlyPlayed = recentlyPlayedTracks.slice(0, 6);
-  const remainingRecentlyPlayed = recentlyPlayedTracks.slice(6);
-  const fallbackUpcomingTracks = (() => {
-    const cachedLists = Object.values(playlistTracks);
-    for (const tracks of cachedLists) {
+  const flattenedPlaylistTracks = useMemo(
+    () => Object.values(playlistTracks).flat(),
+    [playlistTracks]
+  );
+  const trackLookup = useMemo(() => {
+    const lookup = {};
+    (likedTracks || []).forEach((t) => { lookup[t.id] = t; });
+    flattenedPlaylistTracks.forEach((t) => { lookup[t.id] = t; });
+    if (playerState) {
+      lookup[playerState.id] = {
+        id: playerState.id,
+        name: playerState.name,
+        uri: playerState.uri,
+        artists: playerState.artists,
+        albumArt: playerState.albumArt,
+        durationMs: playerState.durationMs,
+      };
+    }
+    return lookup;
+  }, [flattenedPlaylistTracks, likedTracks, playerState]);
+  const snippetTracks = useMemo(
+    () => Object.entries(allTimestamps)
+      .map(([trackId, tss]) => ({
+        trackId,
+        track: trackLookup[trackId] ?? null,
+        tss,
+        latestCreatedAt: Math.max(
+          ...tss.map((ts) => {
+            const created = ts.createdAt ? Date.parse(ts.createdAt) : 0;
+            return Number.isNaN(created) ? 0 : created;
+          })
+        ),
+      }))
+      .sort((a, b) => b.latestCreatedAt - a.latestCreatedAt),
+    [allTimestamps, trackLookup]
+  );
+  const recentPlaylists = useMemo(
+    () => [...playlists].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+    [playlists]
+  );
+  const prioritizedPlaylists = useMemo(() => recentPlaylists.slice(0, 6), [recentPlaylists]);
+  const remainingPlaylists = useMemo(() => recentPlaylists.slice(6), [recentPlaylists]);
+  const prioritizedRecentlyPlayed = useMemo(() => recentlyPlayedTracks.slice(0, 6), [recentlyPlayedTracks]);
+  const remainingRecentlyPlayed = useMemo(() => recentlyPlayedTracks.slice(6), [recentlyPlayedTracks]);
+  const fallbackUpcomingTracks = useMemo(() => {
+    for (const tracks of Object.values(playlistTracks)) {
       const currentIndex = tracks.findIndex((track) => track.id === selectedTrack?.id);
       if (currentIndex >= 0) {
         return tracks.slice(currentIndex + 1, currentIndex + 7);
       }
     }
     return [];
-  })();
-  const browserPlaybackHelp = (() => {
+  }, [playlistTracks, selectedTrack?.id]);
+  const browserPlaybackHelp = useMemo(() => {
     if (webPlayerId) {
       return {
         title: "This browser is ready for playback",
@@ -1207,7 +1283,7 @@ export default function Home() {
       body:
         "Snippet hasn’t been able to create its browser playback device on this machine yet, so Spotify is falling back to other active devices like your phone.",
     };
-  })();
+  }, [webPlayerError, webPlayerId]);
 
   const landingFeatures = [
     {
@@ -1227,6 +1303,16 @@ export default function Home() {
       body: "No more skipping around manually",
     },
   ];
+
+  // ── Render ───────────────────────────────────────────────────────────────────
+
+  if (!hydrated) {
+    return (
+      <main style={{ ...s.main, ...s.centeredLoaderScreen }}>
+        <ThemedLoader size={0.78} label="Loading Snippet" />
+      </main>
+    );
+  }
 
   return (
     <main style={s.main}>
@@ -1775,24 +1861,64 @@ export default function Home() {
         const modalArcEnd = 359.9;
         const modalProgressArcPath = describeArcPath(50, 50, 45, modalArcStart, modalArcEnd);
         return (
-          <div style={s.modalOverlay} onClick={() => setSelectedTrack(null)}>
+          <div
+            style={s.modalOverlay}
+            onClick={() => {
+              setModalMenuOpen(false);
+              setModalMenuSnippetsOpen(false);
+              setSelectedTrack(null);
+            }}
+          >
             <div style={s.modalSheet} onClick={e => e.stopPropagation()}>
               <div style={s.modalAura} />
               <div style={s.modalViewport}>
                 <div style={s.modalHeader}>
-                  <button style={s.modalClose} onClick={() => setSelectedTrack(null)} aria-label="Close player">
+                  <button
+                    style={s.modalClose}
+                    onClick={() => {
+                      setModalMenuOpen(false);
+                      setModalMenuSnippetsOpen(false);
+                      setSelectedTrack(null);
+                    }}
+                    aria-label="Close player"
+                  >
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="m6 9 6 6 6-6" />
                     </svg>
                   </button>
                   <div style={s.modalHandle} />
-                  <button style={s.modalMenuBtn} aria-label="More options">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                      <circle cx="12" cy="5" r="1.8" />
-                      <circle cx="12" cy="12" r="1.8" />
-                      <circle cx="12" cy="19" r="1.8" />
-                    </svg>
-                  </button>
+                  <div style={s.modalHeaderActions}>
+                    <button
+                      className={[
+                        "modal-clip-btn",
+                        modalClipPressed ? "is-pressed" : "",
+                        modalClipSaved ? "is-saved" : "",
+                      ].filter(Boolean).join(" ")}
+                      onClick={handleModalClip}
+                      onPointerDown={() => setModalClipPressed(true)}
+                      onPointerUp={() => setModalClipPressed(false)}
+                      onPointerLeave={() => setModalClipPressed(false)}
+                      onPointerCancel={() => setModalClipPressed(false)}
+                      aria-label={`Save clip at ${formatMs(estimatedPos)}`}
+                      title={`Save clip at ${formatMs(estimatedPos)}`}
+                    >
+                      <span className="modal-clip-btn__icon-wrap">
+                        <img src="/snippet-logo.png" alt="" className="modal-clip-btn__icon" />
+                      </span>
+                      <span className="modal-clip-btn__text">Clip</span>
+                    </button>
+                    <div style={s.modalClipNoticeWrap}>
+                      <span
+                        style={{
+                          ...s.modalClipNotice,
+                          opacity: modalClipNotice ? 1 : 0,
+                          transform: modalClipNotice ? "translateY(0)" : "translateY(-2px)",
+                        }}
+                      >
+                        {modalClipNotice || "\u00A0"}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
                 <div style={s.modalHero}>
@@ -1801,11 +1927,6 @@ export default function Home() {
                       <p style={s.modalTrackName}>{activeModalTrack.name}</p>
                       <p style={s.modalArtist}>{activeModalTrack.artists}</p>
                     </div>
-                    <button style={s.modalFavorite} aria-label="Favorite track">
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m12 20.4-1.15-1.05C5.4 14.36 2 11.28 2 7.5A4.5 4.5 0 0 1 6.5 3C8.24 3 9.91 3.81 11 5.09 12.09 3.81 13.76 3 15.5 3A4.5 4.5 0 0 1 20 7.5c0 3.78-3.4 6.86-8.85 11.86Z" />
-                      </svg>
-                    </button>
                   </div>
 
                   <div style={s.modalDiscStage}>
@@ -1954,7 +2075,28 @@ export default function Home() {
               </div>
               {upcomingTracks.length > 0 && (
                 <div style={s.modalQueuePanel}>
-                  <p style={s.modalQueueHeading}>Up Next</p>
+                  <div style={s.modalQueueHeader}>
+                    <p style={s.modalQueueHeading}>Up Next</p>
+                    <button
+                      style={s.modalQueueMenuBtn}
+                      aria-label="More options"
+                      onClick={() => {
+                        setModalMenuOpen((value) => {
+                          if (value) {
+                            setModalMenuSnippetsOpen(false);
+                            return false;
+                          }
+                          return true;
+                        });
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="12" cy="5" r="1.8" />
+                        <circle cx="12" cy="12" r="1.8" />
+                        <circle cx="12" cy="19" r="1.8" />
+                      </svg>
+                    </button>
+                  </div>
                   <div style={s.modalQueueList}>
                     {upcomingTracks.map((track, index) => (
                       <button
@@ -1977,6 +2119,95 @@ export default function Home() {
                         <span style={s.modalQueueDuration}>{formatMs(track.durationMs)}</span>
                       </button>
                     ))}
+                  </div>
+                </div>
+              )}
+              {modalMenuOpen && (
+                <div
+                  style={s.modalMenuBackdrop}
+                  onClick={() => {
+                    setModalMenuOpen(false);
+                    setModalMenuSnippetsOpen(false);
+                  }}
+                >
+                  <div style={s.modalMenuSheet} onClick={(e) => e.stopPropagation()}>
+                    <div style={s.modalMenuHandle} />
+                    <div style={s.modalMenuHeader}>
+                      {activeModalTrack.albumArt ? (
+                        <img src={activeModalTrack.albumArt} alt="" style={s.modalMenuTrackArt} />
+                      ) : (
+                        <div style={s.modalMenuTrackArtFallback} />
+                      )}
+                      <div style={{ minWidth: 0 }}>
+                        <p style={s.modalMenuTrackName}>{activeModalTrack.name}</p>
+                        <p style={s.modalMenuTrackArtist}>{activeModalTrack.artists}</p>
+                      </div>
+                    </div>
+
+                    <div style={s.modalMenuActions}>
+                      <button
+                        style={s.modalMenuAction}
+                        onClick={() => setSnippetModeEnabled((value) => !value)}
+                      >
+                        <div style={s.modalMenuActionCopy}>
+                          <span style={s.modalMenuActionTitle}>
+                            {snippetModeEnabled ? "Disable snippet mode" : "Enable snippet mode"}
+                          </span>
+                          <span style={s.modalMenuActionSubtle}>
+                            {snippetModeEnabled
+                              ? "Play songs from the beginning"
+                              : "Jump straight to your selected snippet"}
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            ...s.modalMenuTogglePill,
+                            ...(snippetModeEnabled ? s.modalMenuTogglePillActive : {}),
+                          }}
+                        >
+                          {snippetModeEnabled ? "On" : "Off"}
+                        </span>
+                      </button>
+
+                      <button
+                        style={s.modalMenuAction}
+                        onClick={() => setModalMenuSnippetsOpen((value) => !value)}
+                      >
+                        <div style={s.modalMenuActionCopy}>
+                          <span style={s.modalMenuActionTitle}>Select snippet</span>
+                          <span style={s.modalMenuActionSubtle}>
+                            Choose which saved moment snippet mode should use
+                          </span>
+                        </div>
+                        <span style={s.modalMenuChevron}>{modalMenuSnippetsOpen ? "−" : "+"}</span>
+                      </button>
+                    </div>
+
+                    {modalMenuSnippetsOpen && (
+                      <div style={s.modalMenuSnippetSection}>
+                        {tss.length > 0 ? (
+                          <div className="snippet-radio-group">
+                            {tss.map((ts, i) => (
+                              <label key={i} className="snippet-option">
+                                <input
+                                  type="radio"
+                                  name={`menu-snippet-${activeModalTrack.id}`}
+                                  className="snippet-radio-input"
+                                  checked={selectedSnippetIndex === i}
+                                  onChange={() => handleSelectSnippet(activeModalTrack.id, i)}
+                                />
+                                <span className="snippet-label">
+                                  {ts.label || `Snippet ${i + 1}`}
+                                  <span className="snippet-meta">{formatMs(ts.positionMs)}</span>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        ) : (
+                          <p style={s.modalMenuEmpty}>No saved snippets for this song yet.</p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -2160,7 +2391,18 @@ export default function Home() {
           },
         ];
         return (
-          <nav style={s.bottomNav}>
+          <nav
+            style={{
+              ...s.bottomNav,
+              ...(playerState ? s.bottomNavWithMiniPlayer : {}),
+            }}
+          >
+            <div
+              style={{
+                ...s.bottomNavSheen,
+                ...(playerState ? s.bottomNavSheenWithMiniPlayer : {}),
+              }}
+            />
             {tabs.map(({ id, label, icon }) => (
               <button
                 key={id}
@@ -2492,8 +2734,8 @@ const s = {
     boxShadow: "0 18px 44px rgba(0,0,0,0.34)",
   },
   cardGradientBar: {
-    height: 3,
-    background: GRAD,
+    height: 0,
+    background: "transparent",
   },
   cardInner: {
     padding: "1.25rem",
@@ -3162,27 +3404,42 @@ const s = {
   // ── Bottom Nav ──
   bottomNav: {
     position: "fixed",
-    bottom: "1rem",
+    bottom: "0.8rem",
     left: "50%",
     transform: "translateX(-50%)",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-around",
-    gap: "1.5rem",
+    gap: "1.15rem",
     width: "min(calc(100vw - 1.5rem), 560px)",
-    padding: "1rem 1.5rem 0.95rem",
-    background: "linear-gradient(180deg, rgba(8, 6, 12, 0.74) 0%, rgba(6, 4, 9, 0.88) 100%)",
-    backdropFilter: "blur(28px)",
-    WebkitBackdropFilter: "blur(28px)",
-    borderRadius: 28,
-    border: "1px solid rgba(224,170,255,0.12)",
-    boxShadow: "0 12px 42px rgba(0,0,0,0.54), 0 2px 10px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.04)",
+    padding: "0.72rem 1.1rem 0.68rem",
+    background: "linear-gradient(180deg, rgba(10, 7, 16, 0.56) 0%, rgba(8, 6, 12, 0.82) 52%, rgba(6, 4, 9, 0.9) 100%)",
+    backdropFilter: "blur(34px) saturate(1.16)",
+    WebkitBackdropFilter: "blur(34px) saturate(1.16)",
+    borderRadius: 26,
+    border: "1px solid rgba(224,170,255,0.14)",
+    boxShadow: "0 18px 48px rgba(0,0,0,0.48), 0 4px 16px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -10px 26px rgba(0,0,0,0.2)",
     zIndex: 50,
+    overflow: "hidden",
+  },
+  bottomNavWithMiniPlayer: {
+    borderRadius: "14px 14px 26px 26px",
+  },
+  bottomNavSheen: {
+    position: "absolute",
+    inset: "1px 1px auto 1px",
+    height: "46%",
+    borderRadius: 24,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.09) 0%, rgba(255,255,255,0.018) 60%, rgba(255,255,255,0) 100%)",
+    pointerEvents: "none",
+  },
+  bottomNavSheenWithMiniPlayer: {
+    borderRadius: "12px 12px 24px 24px",
   },
   miniPlayerShell: {
     position: "fixed",
     left: "50%",
-    bottom: "5.45rem",
+    bottom: "4.72rem",
     transform: "translateX(-50%)",
     width: "min(calc(100vw - 1.5rem), 560px)",
     zIndex: 49,
@@ -3190,18 +3447,18 @@ const s = {
   miniPlayerBar: {
     display: "flex",
     alignItems: "center",
-    gap: "0.75rem",
-    padding: "0.68rem 0.85rem",
-    borderRadius: 24,
-    background: "linear-gradient(180deg, rgba(8, 6, 12, 0.7) 0%, rgba(8, 6, 12, 0.92) 100%)",
-    border: "1px solid rgba(224,170,255,0.12)",
-    backdropFilter: "blur(28px)",
-    WebkitBackdropFilter: "blur(28px)",
-    boxShadow: "0 14px 34px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.04)",
+    gap: "0.62rem",
+    padding: "0.54rem 0.72rem",
+    borderRadius: 22,
+    background: "linear-gradient(180deg, rgba(11, 8, 17, 0.62) 0%, rgba(8, 6, 12, 0.88) 100%)",
+    border: "1px solid rgba(224,170,255,0.14)",
+    backdropFilter: "blur(30px) saturate(1.14)",
+    WebkitBackdropFilter: "blur(30px) saturate(1.14)",
+    boxShadow: "0 16px 38px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.06)",
   },
   miniModeToggle: {
-    width: 42,
-    height: 42,
+    width: 38,
+    height: 38,
     borderRadius: "50%",
     background: "linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%)",
     border: "1px solid rgba(255,255,255,0.1)",
@@ -3267,7 +3524,7 @@ const s = {
     minWidth: 0,
     display: "flex",
     alignItems: "center",
-    gap: "0.7rem",
+    gap: "0.62rem",
     padding: 0,
     background: "none",
     border: "none",
@@ -3276,24 +3533,24 @@ const s = {
     cursor: "pointer",
   },
   miniPlayerArt: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     objectFit: "cover",
     flexShrink: 0,
     boxShadow: "0 8px 24px rgba(0,0,0,0.32)",
   },
   miniPlayerArtFallback: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     background: "linear-gradient(145deg, rgba(60,9,108,0.56) 0%, rgba(17,10,22,0.92) 100%)",
     flexShrink: 0,
   },
   miniPlayerTrack: {
     display: "block",
     color: "#fbf8ff",
-    fontSize: "0.8rem",
+    fontSize: "0.76rem",
     fontWeight: 620,
     overflow: "hidden",
     textOverflow: "ellipsis",
@@ -3302,8 +3559,8 @@ const s = {
   miniPlayerArtist: {
     display: "block",
     color: "#9485a4",
-    fontSize: "0.66rem",
-    marginTop: "0.14rem",
+    fontSize: "0.63rem",
+    marginTop: "0.1rem",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
@@ -3313,17 +3570,17 @@ const s = {
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-    minWidth: 82,
+    minWidth: 74,
   },
   miniControlCluster: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: "0.45rem",
+    gap: "0.35rem",
   },
   miniPrimaryControl: {
-    width: 38,
-    height: 38,
+    width: 34,
+    height: 34,
     borderRadius: 999,
     border: "1px solid rgba(224,170,255,0.08)",
     background: "rgba(255,255,255,0.03)",
@@ -3334,8 +3591,8 @@ const s = {
     justifyContent: "center",
   },
   miniSecondaryControl: {
-    width: 30,
-    height: 30,
+    width: 28,
+    height: 28,
     borderRadius: 999,
     border: "1px solid rgba(224,170,255,0.08)",
     background: "rgba(255,255,255,0.02)",
@@ -3347,21 +3604,28 @@ const s = {
     flexShrink: 0,
   },
   navBtn: {
-    background: "none",
-    border: "none",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.015) 100%)",
+    border: "1px solid rgba(255,255,255,0.04)",
     cursor: "pointer",
-    color: "rgba(255,255,255,0.38)",
-    padding: "0.2rem",
+    color: "rgba(255,255,255,0.42)",
+    width: 42,
+    height: 42,
+    padding: 0,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     lineHeight: 0,
-    transition: "transform 0.15s ease, color 0.15s ease",
-    borderRadius: 8,
+    transition: "transform 0.15s ease, color 0.15s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease",
+    borderRadius: 999,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.02)",
+    position: "relative",
   },
   navBtnActive: {
-    color: "#E0AAFF",
-    filter: "drop-shadow(0 0 8px rgba(224,170,255,0.3))",
+    color: "#f6eeff",
+    background: "linear-gradient(180deg, rgba(104, 54, 168, 0.22) 0%, rgba(39, 20, 58, 0.08) 100%)",
+    border: "1px solid rgba(224,170,255,0.12)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 0 18px rgba(125, 68, 214, 0.22), 0 10px 22px rgba(0,0,0,0.16)",
+    filter: "drop-shadow(0 0 10px rgba(224,170,255,0.22))",
   },
 
   // ── Search Tab ──
@@ -3412,7 +3676,7 @@ const s = {
   // ── Track Detail Modal ──
   modalOverlay: {
     position: "fixed", inset: 0,
-    background: "radial-gradient(circle at top, rgba(224,170,255,0.12), transparent 26%), rgba(0,0,0,0.88)",
+    background: "radial-gradient(circle at 22% 8%, rgba(255, 170, 224, 0.18), transparent 24%), radial-gradient(circle at 78% 6%, rgba(170, 112, 255, 0.16), transparent 26%), rgba(0,0,0,0.82)",
     backdropFilter: "blur(20px)",
     zIndex: 100,
     display: "flex", alignItems: "stretch", justifyContent: "center",
@@ -3420,7 +3684,7 @@ const s = {
   },
   modalSheet: {
     width: "100%", maxWidth: 600,
-    background: "linear-gradient(180deg, rgba(12,8,17,0.96) 0%, rgba(6,4,9,1) 72%)",
+    background: "linear-gradient(180deg, rgba(49, 28, 72, 0.96) 0%, rgba(58, 33, 88, 0.95) 18%, rgba(42, 24, 64, 0.94) 34%, rgba(19, 12, 30, 0.96) 60%, rgba(9, 6, 14, 0.98) 84%)",
     minHeight: "100%",
     padding: "0 1.25rem 7rem",
     display: "flex", flexDirection: "column",
@@ -3429,10 +3693,10 @@ const s = {
   },
   modalAura: {
     position: "absolute",
-    inset: "0 0 auto 0",
-    height: "52vh",
-    background: "radial-gradient(circle at 20% 18%, rgba(255, 168, 223, 0.45), transparent 35%), radial-gradient(circle at 78% 10%, rgba(186, 118, 255, 0.4), transparent 38%), linear-gradient(135deg, rgba(255, 151, 208, 0.26) 0%, rgba(117, 73, 183, 0.38) 52%, rgba(15, 8, 20, 0.04) 100%)",
-    filter: "blur(4px)",
+    inset: "-8% -4% auto",
+    height: "60vh",
+    background: "radial-gradient(circle at 16% 18%, rgba(255, 163, 216, 0.52), transparent 36%), radial-gradient(circle at 84% 10%, rgba(191, 120, 255, 0.48), transparent 38%), radial-gradient(circle at 52% 24%, rgba(150, 92, 225, 0.26), transparent 44%), linear-gradient(145deg, rgba(255, 140, 210, 0.18) 0%, rgba(151, 91, 229, 0.24) 56%, rgba(15, 8, 20, 0.01) 100%)",
+    filter: "blur(22px)",
     pointerEvents: "none",
   },
   modalViewport: {
@@ -3443,8 +3707,8 @@ const s = {
     display: "flex", alignItems: "center", justifyContent: "space-between",
     padding: "1.25rem 0 0.7rem",
     position: "sticky", top: 0,
-    background: "linear-gradient(180deg, rgba(12,8,17,0.52) 0%, rgba(12,8,17,0) 100%)",
-    backdropFilter: "blur(10px)",
+    background: "linear-gradient(180deg, rgba(47, 28, 71, 0.08) 0%, rgba(47, 28, 71, 0) 100%)",
+    backdropFilter: "blur(6px)",
     zIndex: 1,
   },
   modalClose: {
@@ -3454,25 +3718,110 @@ const s = {
     display: "flex", alignItems: "center", justifyContent: "center",
     fontSize: "0.88rem", flexShrink: 0, padding: 0,
   },
+  modalHeaderActions: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: "0.25rem",
+    flexShrink: 0,
+  },
+  modalClipNoticeWrap: {
+    minHeight: 16,
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "flex-end",
+    width: "100%",
+  },
+  modalClipNotice: {
+    fontSize: "0.68rem",
+    letterSpacing: "0.01em",
+    color: "rgba(248, 241, 255, 0.68)",
+    transition: "opacity 180ms ease, transform 180ms ease",
+    textAlign: "right",
+    whiteSpace: "nowrap",
+  },
   modalHandle: {
     width: 42,
     height: 6,
     borderRadius: 999,
-    background: "rgba(255,255,255,0.34)",
-    boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 4px 18px rgba(255,255,255,0.12)",
+    background: "transparent",
+    boxShadow: "none",
+    opacity: 0,
+  },
+  modalClipBtn: {
+    width: 104,
+    height: 40,
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "linear-gradient(180deg, rgba(15,10,22,0.96) 0%, rgba(10,7,15,0.92) 100%)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 10px 24px rgba(0,0,0,0.2)",
+    backdropFilter: "blur(16px) saturate(1.12)",
+    WebkitBackdropFilter: "blur(16px) saturate(1.12)",
+    color: "#f7f1ff",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    gap: "0.45rem",
+    padding: "0 0.32rem",
+    overflow: "hidden",
+    transition: "transform 160ms ease, box-shadow 180ms ease, background 180ms ease, border-color 180ms ease, gap 180ms ease",
+  },
+  modalClipBtnPressed: {
+    transform: "scale(0.94)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 5px 14px rgba(0,0,0,0.16)",
+  },
+  modalClipBtnSaved: {
+    background: "linear-gradient(180deg, rgba(52,24,78,0.98) 0%, rgba(24,11,34,0.95) 100%)",
+    border: "1px solid rgba(224,170,255,0.42)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.24), 0 0 0 1px rgba(224,170,255,0.16), 0 12px 28px rgba(117,73,183,0.28)",
+  },
+  modalClipIconContainer: {
+    width: 30,
+    height: 30,
+    borderRadius: 999,
+    background: "linear-gradient(180deg, rgba(224,170,255,0.95) 0%, rgba(157,78,221,0.92) 100%)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.28), 0 6px 16px rgba(117,73,183,0.28)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    transition: "width 180ms ease, transform 180ms ease, box-shadow 180ms ease",
+  },
+  modalClipIcon: {
+    width: 17,
+    height: 17,
+    objectFit: "contain",
+    filter: "brightness(0) invert(1)",
+    opacity: 0.98,
+  },
+  modalClipText: {
+    height: "100%",
+    width: 54,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "#fff",
+    fontSize: "0.96rem",
+    fontWeight: 600,
+    letterSpacing: "-0.01em",
+    transition: "transform 180ms ease, opacity 180ms ease",
   },
   modalMenuBtn: {
-    background: "none",
-    border: "none",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.03) 100%)",
+    border: "1px solid rgba(255,255,255,0.14)",
     color: "#f3ebfb",
     cursor: "pointer",
-    width: 36,
-    height: 36,
+    width: 42,
+    height: 42,
     borderRadius: "50%",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     padding: 0,
+    backdropFilter: "blur(16px) saturate(1.12)",
+    WebkitBackdropFilter: "blur(16px) saturate(1.12)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18), 0 10px 26px rgba(0,0,0,0.18)",
   },
   modalHero: {
     paddingTop: "1.2rem",
@@ -3483,23 +3832,9 @@ const s = {
   modalMetaRow: {
     display: "flex",
     alignItems: "flex-start",
-    justifyContent: "space-between",
+    justifyContent: "flex-start",
     gap: "1rem",
     marginBottom: "1.8rem",
-  },
-  modalFavorite: {
-    width: 40,
-    height: 40,
-    borderRadius: "50%",
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.03)",
-    color: "#fff",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-    marginTop: "0.4rem",
   },
   modalDiscStage: {
     position: "relative",
@@ -3735,13 +4070,180 @@ const s = {
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)",
     backdropFilter: "blur(20px)",
   },
+  modalQueueHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "0.75rem",
+    marginBottom: "0.8rem",
+  },
   modalQueueHeading: {
-    margin: "0 0 0.8rem",
+    margin: 0,
     fontSize: "0.72rem",
     fontWeight: 700,
     letterSpacing: "0.12em",
     textTransform: "uppercase",
     color: "rgba(255,255,255,0.46)",
+  },
+  modalQueueMenuBtn: {
+    border: "none",
+    background: "transparent",
+    color: "rgba(255,255,255,0.66)",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0.12rem 0",
+    minWidth: 24,
+    flexShrink: 0,
+    opacity: 0.9,
+  },
+  modalMenuBackdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "linear-gradient(180deg, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0.32) 100%)",
+    backdropFilter: "blur(8px)",
+    WebkitBackdropFilter: "blur(8px)",
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    zIndex: 120,
+  },
+  modalMenuSheet: {
+    width: "100%",
+    maxWidth: 600,
+    minHeight: "34vh",
+    maxHeight: "62vh",
+    padding: "0.9rem 1rem 1.25rem",
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    background: "linear-gradient(180deg, rgba(28,18,42,0.96) 0%, rgba(16,10,24,0.97) 100%)",
+    border: "1px solid rgba(255,255,255,0.09)",
+    borderBottom: "none",
+    boxShadow: "0 -24px 60px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.06)",
+    backdropFilter: "blur(26px) saturate(1.12)",
+    WebkitBackdropFilter: "blur(26px) saturate(1.12)",
+    overflowY: "auto",
+  },
+  modalMenuHandle: {
+    width: 54,
+    height: 5,
+    borderRadius: 999,
+    background: "rgba(255,255,255,0.24)",
+    margin: "0 auto 1rem",
+  },
+  modalMenuHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.8rem",
+    paddingBottom: "0.95rem",
+    borderBottom: "1px solid rgba(255,255,255,0.07)",
+    marginBottom: "0.85rem",
+  },
+  modalMenuTrackArt: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    objectFit: "cover",
+    flexShrink: 0,
+  },
+  modalMenuTrackArtFallback: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    flexShrink: 0,
+    background: "linear-gradient(145deg, rgba(224,170,255,0.3) 0%, rgba(60,9,108,0.65) 100%)",
+  },
+  modalMenuTrackName: {
+    margin: "0 0 0.22rem",
+    color: "#f9f4ff",
+    fontSize: "1.05rem",
+    fontWeight: 650,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  modalMenuTrackArtist: {
+    margin: 0,
+    color: "rgba(255,255,255,0.58)",
+    fontSize: "0.82rem",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  modalMenuActions: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.65rem",
+  },
+  modalMenuAction: {
+    width: "100%",
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.018) 100%)",
+    borderRadius: 22,
+    padding: "0.95rem 1rem",
+    color: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "1rem",
+    cursor: "pointer",
+    textAlign: "left",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+  },
+  modalMenuActionCopy: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.2rem",
+    minWidth: 0,
+  },
+  modalMenuActionTitle: {
+    color: "#fcf7ff",
+    fontSize: "0.96rem",
+    fontWeight: 620,
+  },
+  modalMenuActionSubtle: {
+    color: "rgba(255,255,255,0.56)",
+    fontSize: "0.76rem",
+    lineHeight: 1.35,
+  },
+  modalMenuTogglePill: {
+    minWidth: 42,
+    height: 28,
+    padding: "0 0.7rem",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "rgba(255,255,255,0.04)",
+    color: "rgba(255,255,255,0.7)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "0.74rem",
+    fontWeight: 700,
+    letterSpacing: "0.03em",
+    flexShrink: 0,
+  },
+  modalMenuTogglePillActive: {
+    background: "linear-gradient(180deg, rgba(224,170,255,0.22) 0%, rgba(157,78,221,0.14) 100%)",
+    border: "1px solid rgba(224,170,255,0.24)",
+    color: "#f3e8ff",
+    boxShadow: "0 0 16px rgba(224,170,255,0.18)",
+  },
+  modalMenuChevron: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: "1.15rem",
+    fontWeight: 500,
+    flexShrink: 0,
+  },
+  modalMenuSnippetSection: {
+    marginTop: "0.85rem",
+    paddingTop: "0.9rem",
+    borderTop: "1px solid rgba(255,255,255,0.07)",
+  },
+  modalMenuEmpty: {
+    margin: 0,
+    color: "rgba(255,255,255,0.54)",
+    fontSize: "0.82rem",
   },
   modalQueueList: {
     display: "flex",

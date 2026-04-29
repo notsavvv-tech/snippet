@@ -1427,6 +1427,7 @@ export default function Home() {
                 <button style={{ ...s.btnGhost, marginTop: "0.9rem" }} onClick={fetchDevices}>
                   {loadingDevices ? <ThemedLoader size={0.28} label="Refreshing" inline /> : "Refresh devices"}
                 </button>
+                <button style={{ ...s.btnGhost, marginTop: "0.9rem" }} onClick={fetchDevices}>Refresh devices</button>
               </div>
             ) : (
             <div style={s.card}>
@@ -1476,6 +1477,10 @@ export default function Home() {
                   </p>
                 </div>
               )}
+              </div>
+              </div>
+            </div>
+          )}
 
             <section style={s.sectionBlock}>
               <button style={s.sectionHeader} onClick={() => setSnippetsOpen((v) => !v)}>
@@ -1538,6 +1543,167 @@ export default function Home() {
             )}
 
           {/* ── Your Snippets ── */}
+              )}
+            </section>
+
+          {/* ── Your Snippets ── */}
+          {Object.keys(allTimestamps).length > 0 && (() => {
+            const trackLookup = {};
+            (likedTracks || []).forEach((t) => { trackLookup[t.id] = t; });
+            Object.values(playlistTracks).flat().forEach((t) => { trackLookup[t.id] = t; });
+            if (playerState) trackLookup[playerState.id] = { id: playerState.id, name: playerState.name, uri: playerState.uri, artists: playerState.artists, albumArt: playerState.albumArt, durationMs: playerState.durationMs };
+
+            const snippetTracks = Object.entries(allTimestamps).map(([trackId, tss]) => ({
+              trackId,
+              track: trackLookup[trackId] ?? null,
+              tss,
+            }));
+
+            return (
+            <section style={s.sectionBlock}>
+              <button style={s.sectionHeader} onClick={() => setSnippetsOpen((v) => !v)}>
+                <div>
+                  <p style={s.sectionTitle}>Your Snippets</p>
+                  <p style={s.sectionSubtle}>Organized by most recent moments</p>
+                </div>
+                <div style={s.sectionHeaderRight}>
+                  <span style={s.sectionMeta}>{snippetTracks.length}</span>
+                  <span style={{ ...s.chevron, fontSize: "0.85rem" }}>{snippetsOpen ? "▲" : "▼"}</span>
+                </div>
+              </button>
+              {snippetsOpen && (
+                snippetTracks.length === 0 ? (
+                  <p style={{ ...s.muted, padding: "0.25rem 0.35rem 0.4rem" }}>Save a few snippets and they’ll show up here.</p>
+                ) : (
+                  <div style={s.snippetDropdown}>
+                    {snippetTracks.map(({ trackId, track, tss }) => {
+                      const snippetTrackOpen = Boolean(openSnippetTracks[trackId]);
+                      const selectedSnippetIndex = Math.min(
+                        selectedSnippetIndexByTrack[trackId] ?? 0,
+                        Math.max(0, tss.length - 1)
+                      );
+                      const selectedSnippet = tss[selectedSnippetIndex];
+                      return (
+                        <div key={trackId} style={s.snippetCard}>
+                          <div style={s.snippetCardHeader}>
+                            {track?.albumArt ? (
+                              <img src={track.albumArt} alt="" style={s.snippetArt} />
+                            ) : (
+                              <div style={s.snippetArtFallback} />
+                            )}
+                            <div style={s.snippetTrackMeta}>
+                              <span style={s.snippetTrackName}>{track?.name ?? "Unknown track"}</span>
+                              <span style={s.snippetTrackArtist}>{track?.artists ?? trackId}</span>
+                            </div>
+                            <div style={s.snippetCardActions}>
+                              <button
+                                style={s.snippetExpandBtn}
+                                onClick={() => handleToggleSnippetTrack(trackId)}
+                                title={snippetTrackOpen ? "Hide snippets" : "Show snippets"}
+                                aria-label={snippetTrackOpen ? "Hide snippets" : "Show snippets"}
+                              >
+                                <svg
+                                  viewBox="0 0 24 24"
+                                  width="13"
+                                  height="13"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  style={{
+                                    transform: snippetTrackOpen ? "rotate(180deg)" : "rotate(0deg)",
+                                    transition: "transform 0.18s ease",
+                                  }}
+                                >
+                                  <path d="m6 9 6 6 6-6" />
+                                </svg>
+                              </button>
+                              {track && (
+                                <button
+                                  style={s.playTrackBtn}
+                                  onClick={() => playTrackWithMode(track)}
+                                  title={snippetModeEnabled ? "Play selected snippet" : "Play from start"}
+                                >
+                                  <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          {snippetTrackOpen && (
+                            <>
+                              <div style={s.snippetList}>
+                                {tss.map((ts, i) => {
+                                  const isEditing = editingSnippet?.trackId === trackId && editingSnippet?.index === i;
+                                  return (
+                                    <div key={i} style={s.snippetRow}>
+                                      {isEditing ? (
+                                        <>
+                                          <input
+                                            style={s.snippetEditInput}
+                                            value={editLabel}
+                                            onChange={(e) => setEditLabel(e.target.value)}
+                                            onKeyDown={(e) => {
+                                              if (e.key === "Enter") handleUpdateTimestamp(trackId, i, editLabel);
+                                              if (e.key === "Escape") setEditingSnippet(null);
+                                            }}
+                                            autoFocus
+                                          />
+                                          <span style={s.tsTime}>{formatMs(ts.positionMs)}</span>
+                                          <button style={s.snippetSaveBtn} onClick={() => handleUpdateTimestamp(trackId, i, editLabel)}>✓</button>
+                                          <button style={s.deleteBtn} onClick={() => setEditingSnippet(null)}>✕</button>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <label
+                                            className={`snippet-option${!snippetModeEnabled ? " snippet-option-dormant" : ""}`}
+                                            style={s.snippetToggleRow}
+                                          >
+                                            <input
+                                              type="radio"
+                                              name={`snippet-track-${trackId}`}
+                                              className="snippet-radio-input"
+                                              checked={selectedSnippetIndex === i}
+                                              onChange={() => handleSelectSnippet(trackId, i)}
+                                            />
+                                            <span className="snippet-selector" />
+                                            <span className="snippet-glow" />
+                                            <span className="snippet-label">
+                                              {ts.label || `Snippet ${i + 1}`}
+                                              <span className="snippet-meta">{formatMs(ts.positionMs)}</span>
+                                            </span>
+                                            <span className="snippet-connector" />
+                                          </label>
+                                          <button
+                                            style={s.editBtn}
+                                            onClick={() => { setEditingSnippet({ trackId, index: i }); setEditLabel(ts.label || ""); }}
+                                            title="Edit label"
+                                          >✏</button>
+                                          <button style={s.deleteBtn} onClick={() => handleDelete(trackId, i)} title="Remove">✕</button>
+                                        </>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              {track && selectedSnippet && (
+                                <div style={s.snippetCardFooter}>
+                                  <button style={{ ...s.btnPrimary, width: "100%" }} onClick={() => jump(track, selectedSnippet.positionMs, track)}>
+                                    Play selected snippet
+                                  </button>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              )}
+            </section>
+            );
+          })()}
 
             <section style={s.sectionBlock}>
               <button style={s.sectionHeader} onClick={() => setPlaylistsOpen((v) => !v)}>
